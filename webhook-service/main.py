@@ -136,8 +136,11 @@ async def handle_meta_webhook(
             f"Received InboundMessage: id={msg.message_id}, type={msg.message_type}, "
             f"sender={msg.sender_phone}, interactive_id={msg.interactive_id}"
         )
-        # Process asynchronously in background
-        background_tasks.add_task(process_inbound_message, msg)
+        # Process inline so Cloud Run keeps CPU allocated until the reply is sent
+        try:
+            await process_inbound_message(msg)
+        except Exception as e:
+            logger.error(f"Failed to process message {msg.message_id}: {e}", exc_info=True)
 
     return {"status": "ok", "messages_received": len(inbound_messages)}
 
