@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "google-cloud-data": {
+      "command": "python3",
+      "args": ["-m", "google.cloud.data_agent_kit"],
+      "env": {
+        "GCP_PROJECT": "clandexis",
+        "BIGQUERY_DATASET": "clandexis_analytics",
+        "FIRESTORE_DATABASE": "(default)"
+      }
+    }
+  }
+}

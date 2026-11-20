@@ -1,0 +1,170 @@
+"""
+Unit tests for Meta WhatsApp Business Cloud API data models and signature verification.
+"""
+
+import hashlib
+import hmac
+import json
+import pytest
+
+from models.canonical import ChannelType, MessageType
+from models.whatsapp_meta import MetaWebhookPayload
+from webhook_service.meta_whatsapp_handler import MetaWhatsAppService
+from webhook_service.security import verify_meta_signature
+
+
+def test_verify_meta_signature():
+    app_secret = "test_meta_secret_123"
+    payload = b'{"object":"whatsapp_business_account","entry":[]}'
+    
+    # Generate valid signature
+    digest = hmac.new(app_secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+    valid_header = f"sha256={digest}"
+    
+    assert verify_meta_signature(payload, valid_header, app_secret) is True
+    assert verify_meta_signature(payload, "sha256=invalid_hash", app_secret) is False
+    assert verify_meta_signature(payload, None, app_secret) is False
+
+
+def test_meta_webhook_text_parsing():
+    raw_payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "WABA_ID_12345",
+                "changes": [
+                    {
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {
+                                "display_phone_number": "15550269999",
+                                "phone_number_id": "PHONE_NUM_ID_6789",
+                            },
+                            "contacts": [
+                                {
+                                    "profile": {"name": "Rajesh Kumar"},
+                                    "wa_id": "919876543210",
+                                }
+                            ],
+                            "messages": [
+                                {
+                                    "from": "919876543210",
+                                    "id": "wamid.HBgLMTIzNDU2",
+                                    "timestamp": "1732080000",
+                                    "type": "text",
+                                    "text": {"body": "Aaj 200 cotton shirts banayi hain"},
+                                }
+                            ],
+                        },
+                        "field": "messages",
+                    }
+                ],
+            }
+        ],
+    }
+
+    service = MetaWhatsAppService(token="fake_token", phone_number_id="fake_phone_id")
+    inbound_msgs = service.parse_webhook_payload(raw_payload)
+
+    assert len(inbound_msgs) == 1
+    msg = inbound_msgs[0]
+    assert msg.message_id == "wamid.HBgLMTIzNDU2"
+    assert msg.sender_phone == "+919876543210"
+    assert msg.sender_name == "Rajesh Kumar"
+    assert msg.channel == ChannelType.META_WHATSAPP
+    assert msg.message_type == MessageType.TEXT
+    assert msg.text_content == "Aaj 200 cotton shirts banayi hain"
+
+
+def test_meta_webhook_voice_note_parsing():
+    raw_payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "WABA_ID_12345",
+                "changes": [
+                    {
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {
+                                "display_phone_number": "15550269999",
+                                "phone_number_id": "PHONE_NUM_ID_6789",
+                            },
+                            "messages": [
+                                {
+                                    "from": "919876543210",
+                                    "id": "wamid.VOICE_9988",
+                                    "timestamp": "1732080000",
+                                    "type": "audio",
+                                    "audio": {
+                                        "id": "MEDIA_ID_AUDIO_123",
+                                        "mime_type": "audio/ogg; codecs=opus",
+                                        "sha256": "abcdef123456",
+                                        "voice": True,
+                                    },
+                                }
+                            ],
+                        },
+                        "field": "messages",
+                    }
+                ],
+            }
+        ],
+    }
+
+    service = MetaWhatsAppService()
+    inbound_msgs = service.parse_webhook_payload(raw_payload)
+
+    assert len(inbound_msgs) == 1
+    msg = inbound_msgs[0]
+    assert msg.message_id == "wamid.VOICE_9988"
+    assert msg.message_type == MessageType.AUDIO
+    assert msg.media_id == "MEDIA_ID_AUDIO_123"
+    assert msg.media_mime_type == "audio/ogg; codecs=opus"
+
+
+def test_meta_webhook_interactive_button_click():
+    raw_payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "WABA_ID_12345",
+                "changes": [
+                    {
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {
+                                "display_phone_number": "15550269999",
+                                "phone_number_id": "PHONE_NUM_ID_6789",
+                            },
+                            "messages": [
+                                {
+                                    "from": "919876543210",
+                                    "id": "wamid.BTN_CLICK_777",
+                                    "timestamp": "1732080000",
+                                    "type": "interactive",
+                                    "interactive": {
+                                        "type": "button_reply",
+                                        "button_reply": {
+                                            "id": "CONFIRM_SALE_TXN9823",
+                                            "title": "✅ Confirm & Bill",
+                                        },
+                                    },
+                                }
+                            ],
+                        },
+                        "field": "messages",
+                    }
+                ],
+            }
+        ],
+    }
+
+    service = MetaWhatsAppService()
+    inbound_msgs = service.parse_webhook_payload(raw_payload)
+
+    assert len(inbound_msgs) == 1
+    msg = inbound_msgs[0]
+    assert msg.message_type == MessageType.INTERACTIVE_BUTTON
+    assert msg.interactive_id == "CONFIRM_SALE_TXN9823"
+    assert msg.interactive_title == "✅ Confirm & Bill"

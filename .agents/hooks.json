@@ -1,0 +1,24 @@
+{
+  "version": "1.0",
+  "name": "clandexis-invisible-erp-hooks",
+  "description": "Agent lifecycle hooks and safety gates for MSME conversational ERP",
+  "hooks": {
+    "pre_mutation_guard": {
+      "skill": "atomic-ledger-write",
+      "conditions": [
+        "confidence_score >= 0.85",
+        "math_verified == true",
+        "udhaar_balance_check <= high_credit_threshold"
+      ],
+      "on_failure": "route_to_safety_gate_pending_confirmation"
+    },
+    "attestation_signing_guard": {
+      "skill": "credit-attestation",
+      "conditions": [
+        "trial_balance_balanced == true",
+        "period_closed == true"
+      ],
+      "on_failure": "abort_attestation_with_error"
+    }
+  }
+}

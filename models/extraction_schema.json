@@ -1,0 +1,127 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ClandexisExtractionPayload",
+  "description": "Strict JSON schema for Gemini 3.8 Flash / 4 Carbon multimodal extraction from vernacular voice and handwritten receipts",
+  "type": "object",
+  "properties": {
+    "intent": {
+      "type": "string",
+      "enum": [
+        "PRODUCTION_LOG",
+        "SALE_INVOICE",
+        "PURCHASE_ENTRY",
+        "UDHAAR_COLLECTION",
+        "ANALYTICS_QUERY",
+        "EXPENSE",
+        "UNKNOWN"
+      ],
+      "description": "Primary operational intent of the merchant"
+    },
+    "detected_language": {
+      "type": "string",
+      "description": "Detected spoken or written language (e.g., 'Hindi', 'Hinglish', 'Telugu', 'English')"
+    },
+    "party_name": {
+      "type": ["string", "null"],
+      "description": "Extracted customer or supplier name (e.g., 'Ramesh', 'Suresh Traders')"
+    },
+    "line_items": {
+      "type": "array",
+      "description": "List of products/goods mentioned in the input",
+      "items": {
+        "type": "object",
+        "properties": {
+          "item_name": {
+            "type": "string",
+            "description": "Name of the item or SKU"
+          },
+          "quantity": {
+            "type": "number",
+            "description": "Quantity count or volume"
+          },
+          "unit": {
+            "type": "string",
+            "description": "Unit of measurement (pieces, meters, kg, boxes, liters)"
+          },
+          "unit_price": {
+            "type": "number",
+            "description": "Price per unit in INR (₹)"
+          },
+          "discount": {
+            "type": "number",
+            "description": "Item discount in INR (₹)"
+          },
+          "subtotal": {
+            "type": "number",
+            "description": "Line total: (quantity * unit_price) - discount"
+          }
+        },
+        "required": ["item_name", "quantity", "unit", "unit_price", "subtotal"]
+      }
+    },
+    "payments": {
+      "type": "array",
+      "description": "Breakdown of payment methods, settled amounts, and credit (udhaar)",
+      "items": {
+        "type": "object",
+        "properties": {
+          "method": {
+            "type": "string",
+            "enum": ["UPI", "CASH", "BANK_TRANSFER", "UDHAAR_CREDIT", "ADVANCE_ADJUSTED"],
+            "description": "Payment channel/method"
+          },
+          "amount": {
+            "type": "number",
+            "description": "Monetary value allocated in INR (₹)"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["SETTLED", "PENDING_COLLECTION", "APPLIED"],
+            "description": "Settlement state"
+          },
+          "settlement_reference": {
+            "type": ["string", "null"],
+            "description": "UPI reference, UTR, or check number"
+          },
+          "due_date": {
+            "type": ["string", "null"],
+            "description": "Promise date for credit/udhaar settlement (e.g. 'next week', 'Friday')"
+          }
+        },
+        "required": ["method", "amount", "status"]
+      }
+    },
+    "total_amount": {
+      "type": "number",
+      "description": "Gross monetary total of the transaction in INR (₹)"
+    },
+    "confidence_score": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "AI extraction confidence metric"
+    },
+    "ambiguity_reason": {
+      "type": ["string", "null"],
+      "description": "Reason for uncertainty (e.g., 'Muffled audio on price', 'Unclear handwriting on quantity')"
+    },
+    "requires_confirmation": {
+      "type": "boolean",
+      "description": "Flag indicating if human-in-the-loop safety gate must be triggered"
+    },
+    "raw_transcript": {
+      "type": "string",
+      "description": "Verbatim transcript of speech audio or OCR text"
+    }
+  },
+  "required": [
+    "intent",
+    "detected_language",
+    "line_items",
+    "payments",
+    "total_amount",
+    "confidence_score",
+    "requires_confirmation",
+    "raw_transcript"
+  ]
+}
