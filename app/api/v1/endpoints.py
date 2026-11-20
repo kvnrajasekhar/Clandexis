@@ -1,5 +1,6 @@
 from datetime import timedelta
 import hashlib
+import logging
 import os
 import shutil
 import tempfile
@@ -16,8 +17,10 @@ from app.schemas.speech import TextToSpeechRequest, TextToSpeechResponse
 from app.services.speech import synthesize_speech
 
 from app.core.security import SessionIdentity, dashboard_identity
+from app.core.observability import unavailable
 
 router = APIRouter(dependencies=[Depends(dashboard_identity)])
+logger = logging.getLogger(__name__)
 pipeline = None
 
 def get_pipeline():
@@ -78,9 +81,12 @@ async def extract_from_text(payload: TextExtractionRequest, identity: SessionIde
             raw_text=payload.raw_text,
             merchant_business_name=payload.merchant_business_name,
         )
+    except Exception as exc:
+        raise unavailable(logger, "dashboard.text_extraction", exc) from None
+    try:
         return dashboard_result(result, identity, payload.stage)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Processing unavailable")
+    except Exception as exc:
+        raise unavailable(logger, "dashboard.candidate_staging", exc) from None
 
 @router.post("/extract/media", response_model=DashboardExtractionResult, summary="Extract & Validate Transaction from Audio, Image, or PDF")
 async def extract_from_media(
@@ -114,9 +120,14 @@ async def extract_from_media(
             media_path=tmp_path,
             merchant_business_name=merchant_business_name,
         )
+    except Exception as exc:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise unavailable(logger, "dashboard.media_extraction", exc) from None
+    try:
         return dashboard_result(result, identity, stage)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Processing unavailable")
+    except Exception as exc:
+        raise unavailable(logger, "dashboard.candidate_staging", exc) from None
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
@@ -146,8 +157,8 @@ async def generate_speech(payload: TextToSpeechRequest, identity: SessionIdentit
             message="Speech audio generated successfully",
             audio_path=out_path,
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Processing unavailable")
+    except Exception as exc:
+        raise unavailable(logger, "dashboard.speech_synthesis", exc) from None
 
 @router.get("/speech/download", summary="Download generated audio")
 async def download_speech(audio_path: str, identity: SessionIdentity = Depends(dashboard_identity)):
