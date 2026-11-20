@@ -31,9 +31,9 @@ async def lifespan(app: FastAPI):
     meta_service = MetaWhatsAppService()
     try:
         from app.services.confirmation import configure_confirmation
-        from app.services.confirmation_ledger_adapter import ClaudeLedgerAdapter
-        configure_confirmation(ClaudeLedgerAdapter())
-        logger.info("MetaWhatsAppService and ClaudeLedgerAdapter initialized.")
+        from app.services.persistence import confirmation_adapter
+        configure_confirmation(confirmation_adapter())
+        logger.info("WhatsApp transport and %s ledger adapter initialized.", settings.DATABASE_BACKEND)
     except Exception as e:
         logger.warning("Ledger adapter unavailable (%s)", type(e).__name__)
     yield
@@ -76,6 +76,7 @@ async def health_check():
         "service": "webhook-service",
         "channel": "meta_whatsapp",
         "api_version": "v21.0",
+        "database_backend": settings.DATABASE_BACKEND,
     }
 
 

@@ -1,7 +1,6 @@
 """Explicit buildathon phone allowlist. No implicit merchant provisioning."""
 import json
 import re
-from config import settings
 
 
 def normalize_phone(value: str) -> str:
@@ -16,6 +15,7 @@ def normalize_phone(value: str) -> str:
 
 
 def resolve_phone(value: str) -> str | None:
+    from config import settings
     try:
         phone = normalize_phone(value)
         raw = json.loads(settings.WHATSAPP_DEMO_PHONE_MAP)

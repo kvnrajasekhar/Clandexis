@@ -84,7 +84,8 @@ def process_whatsapp_message(message, *, media_bytes=None):
         raise ConfirmationError("Sender is not authorized for this merchant")
     message = message.model_copy(update={"sender_phone": phone})
     service = get_confirmation_service()
-    store = ConversationStore(service.ledger.db, message.tenant_id)
+    from app.services.persistence import conversation_store
+    store = conversation_store(service.ledger.db, message.tenant_id)
     try:
         state, cached, token, event = store.claim(message)
     except ConversationBusy as exc:

@@ -1592,3 +1592,23 @@ def get_daily_summary(
         credit_extended=credit, collections_total=coll, units_produced=produced,
         total_receivables_outstanding=ar_out,
     )
+
+
+# Backend-neutral read contracts used by the dashboard during SQL migration.
+def get_candidate_record(merchant_id, candidate_id, *, db=None):
+    snap = _col(db or get_db(), merchant_id, COL_CANDIDATES).document(candidate_id).get()
+    row = snap.to_dict() if snap.exists else None
+    if not row or row.get("merchant_id") != merchant_id:
+        raise CandidateNotFoundError("Candidate unavailable")
+    return row
+
+
+def list_candidates(merchant_id, *, db=None):
+    rows = _col(db or get_db(), merchant_id, COL_CANDIDATES).order_by("created_at", direction=firestore.Query.DESCENDING).limit(30).stream()
+    return [{**r.to_dict(),"candidate_id":r.id,"revision":r.to_dict().get("snapshot_sha256")} for r in rows]
+
+
+def list_parties(merchant_id, *, db=None):
+    rows = _col(db or get_db(), merchant_id, COL_PARTIES).stream()
+    return [{"party_id":r.id,"display_name":r.to_dict().get("display_name",r.id),"phone":r.to_dict().get("phone"),
+        "current_udhaar_balance":_party_balance(r.to_dict()),"credit_limit":to_money(r.to_dict().get("credit_limit",50000))} for r in rows]

@@ -29,6 +29,8 @@ class Settings(BaseModel):
     # ==========================================================================
     # Google Cloud Platform (GCP)
     # ==========================================================================
+    DATABASE_BACKEND: str = Field(default_factory=lambda: os.getenv("DATABASE_BACKEND", "firestore"))
+    DATABASE_URL: Optional[str] = Field(default_factory=lambda: os.getenv("DATABASE_URL"))
     GCP_PROJECT_ID: str = Field(default_factory=lambda: os.getenv("GCP_PROJECT_ID", "clandexis"))
     GCP_REGION: str = Field(default_factory=lambda: os.getenv("GCP_REGION", "asia-south1"))
     FIRESTORE_DATABASE: str = Field(default_factory=lambda: os.getenv("FIRESTORE_DATABASE", "(default)"))

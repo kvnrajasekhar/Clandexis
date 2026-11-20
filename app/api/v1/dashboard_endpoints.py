@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.services import ledger
+from app.services.persistence import ledger
 from app.core.security import SessionIdentity, dashboard_identity
 from app.services.confirmation import AuthenticatedMerchant, ConfirmationError, handle_confirmation
 from app.services.posting_flow import generate_posting_document
@@ -79,24 +79,7 @@ def get_dashboard_parties(
     """
     merchant_id = identity.merchant_id
     try:
-        db = ledger.get_db()
-        col = ledger._col(db, merchant_id, ledger.COL_PARTIES)
-        parties = []
-        for doc in col.stream():
-            d = doc.to_dict()
-            bal_minor = d.get("udhaar_balance_minor")
-            if bal_minor is not None:
-                bal = float(ledger.from_minor(bal_minor))
-            else:
-                bal = float(d.get("current_udhaar_balance", 0.0))
-            parties.append({
-                "party_id": doc.id,
-                "display_name": d.get("display_name", doc.id),
-                "phone": d.get("phone"),
-                "current_udhaar_balance": bal,
-                "credit_limit": float(d.get("credit_limit", 50000.0)),
-            })
-        return parties
+        return _to_json_compatible(ledger.list_parties(merchant_id))
     except Exception as e:
         raise HTTPException(status_code=500, detail="Dashboard operation failed")
 
@@ -128,25 +111,13 @@ def get_dashboard_candidates(
     """
     merchant_id = identity.merchant_id
     try:
-        db = ledger.get_db()
-        col = db.collection("merchants").document(merchant_id).collection("transaction_candidates")
-        candidates = []
-        for doc in col.order_by("created_at", direction=ledger.firestore.Query.DESCENDING).limit(30).stream():
-            d = doc.to_dict()
-            candidates.append({
-                "candidate_id": doc.id,
-                "source_message_id": d.get("source_message_id"),
-                "revision": d.get("snapshot_sha256"),
-                "posting_status": d.get("posting_status"),
-                "validation_status": d.get("validation_status"),
-                "hold_source": d.get("hold_source"),
-                "hold_reasons": d.get("hold_reasons", []),
-                "validation_warnings": d.get("validation_warnings", []),
-                "extracted_snapshot": d.get("extracted_snapshot"),
-                "created_at": d.get("created_at").isoformat() if d.get("created_at") else None,
-                "expires_at": d.get("expires_at").isoformat() if d.get("expires_at") else None,
-            })
-        return candidates
+        candidates = ledger.list_candidates(merchant_id)
+        for row in candidates:
+            row["revision"] = row.get("snapshot_sha256")
+            for key in ("created_at", "expires_at"):
+                if row.get(key):
+                    row[key] = row[key].isoformat()
+        return _to_json_compatible(candidates)
     except Exception as e:
         raise HTTPException(status_code=500, detail="Dashboard operation failed")
 
@@ -216,8 +187,10 @@ def clarify_candidate(candidate_id: str, reply: ClarificationReply,
     from app.services.validator import BusinessValidator
 
     merchant_id = identity.merchant_id
-    document = ledger.get_db().collection("merchants").document(merchant_id).collection(
-        "transaction_candidates").document(candidate_id).get().to_dict()
+    try:
+        document = ledger.get_candidate_record(merchant_id, candidate_id)
+    except (ledger.LedgerError, ValueError):
+        raise HTTPException(404, "Candidate unavailable")
     if not document or document.get("merchant_id") != merchant_id:
         raise HTTPException(404, "Candidate unavailable")
     if document["posting_status"] != "NEEDS_REVIEW" or document["snapshot_sha256"] != reply.revision:
@@ -255,14 +228,16 @@ def review_candidate(candidate_id: str, payload: ReviewRequest,
 
 @router.get("/transactions/{txn_id}/invoice")
 def download_invoice(txn_id: str, identity: SessionIdentity = Depends(dashboard_identity)):
-    ref = ledger.get_db().collection("merchants").document(identity.merchant_id).collection("transactions").document(txn_id)
-    tx = ref.get().to_dict() or {}
-    if tx.get("status") != "COMMITTED" or tx.get("intent") != "SALE_INVOICE" or tx.get("merchant_id") != identity.merchant_id:
-        raise HTTPException(404, "Committed sale unavailable")
-    data = ref.collection("invoice_artifacts").document("basic_v1").get().to_dict()
-    if not data:
+    from app.services.persistence import get_invoice_artifact
+    try:
+        tx = ledger.get_transaction(identity.merchant_id, txn_id)
+        if tx.get("intent") != "SALE_INVOICE":
+            raise ValueError("Invoice requires sale")
+        artifact = get_invoice_artifact(identity.merchant_id, txn_id)
+        if artifact is None:
+            raise ValueError("Invoice unavailable")
+    except (ledger.LedgerError, ValueError):
         raise HTTPException(404, "Invoice unavailable")
-    artifact = InvoiceArtifact.model_validate(data)
     if artifact.merchant_id != identity.merchant_id or artifact.transaction_id != txn_id:
         raise HTTPException(404, "Invoice unavailable")
     if settings.INVOICE_LOCAL_ROOT:

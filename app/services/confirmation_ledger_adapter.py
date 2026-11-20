@@ -96,7 +96,9 @@ class ClaudeLedgerAdapter:
             if row.get("reference_txn_id") != result.txn_id:
                 raise RuntimeError("Inventory movement transaction mismatch")
             balances[row["sku_id"]] = Decimal(str(row["balance_after"]))
-        return PostingResult(result.txn_id, result.received_amount, result.credit_amount, balances)
+        outstanding = getattr(result, "party_balance", None)
+        return PostingResult(result.txn_id, result.received_amount,
+                             outstanding if outstanding is not None else result.credit_amount, balances)
 
     def cancel_candidate(self, merchant_id, candidate_id, source_event_id, expected_revision, now, *, actor_phone=None):
         try:

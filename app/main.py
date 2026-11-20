@@ -6,8 +6,8 @@ from app.api.v1 import api_router
 @asynccontextmanager
 async def lifespan(app):
     from app.services.confirmation import configure_confirmation
-    from app.services.confirmation_ledger_adapter import ClaudeLedgerAdapter
-    configure_confirmation(ClaudeLedgerAdapter())
+    from app.services.persistence import confirmation_adapter
+    configure_confirmation(confirmation_adapter())
     yield
 
 

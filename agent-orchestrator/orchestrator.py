@@ -43,6 +43,7 @@ def orchestrate_inbound_message(message: InboundMessage, *, media_bytes: bytes |
             MessageType.DOCUMENT, MessageType.INTERACTIVE_BUTTON, MessageType.INTERACTIVE_LIST):
         return None, OutboundMessage(recipient_phone=message.sender_phone,
             text_content="Unsupported message type. Nothing posted.")
+    durable_processing = conversation is not None
     conversation = conversation if conversation is not None else {}
     from app.services.conversation_language import preference, question
     language, script = preference(message.text_content or "", conversation)
@@ -106,6 +107,7 @@ def orchestrate_inbound_message(message: InboundMessage, *, media_bytes: bytes |
     result = pipeline.process_and_interpret(
         merchant_id=message.tenant_id, message_id=message.message_id,
         raw_text=raw_text, media_path=message.media_url,
+        deduplicate=not durable_processing,
         media_bytes=media_bytes, mime_type=(message.media_mime_type or "").split(";")[0].strip().lower() or None)
     if result.input_metadata.is_duplicate:
         return result, OutboundMessage(recipient_phone=message.sender_phone,

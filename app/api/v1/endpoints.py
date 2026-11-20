@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from app.services import ledger
+from app.services.persistence import ledger
 from app.pipeline import PipelineService
 from app.schemas.transaction import ProcessingResult
 from app.schemas.speech import TextToSpeechRequest, TextToSpeechResponse

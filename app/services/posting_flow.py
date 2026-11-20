@@ -1,7 +1,7 @@
 """Document side effects run only after the ledger commit has returned."""
 import logging
 from config import settings
-from app.services import ledger
+from app.services.persistence import ledger, invoice_repository
 from pdf_service import InvoiceService, LocalArtifactStore
 from pdf_service.firestore_repository import FirestoreInvoiceRepository
 from pdf_service.gcs_store import GCSArtifactStore
@@ -32,7 +32,7 @@ def generate_posting_document(merchant, posting):
             else:
                 store = GCSArtifactStore(settings.GCS_BUCKET_NAME)
                 _url_resolver = store.document_url
-            _invoice_service = InvoiceService(FirestoreInvoiceRepository(), store)
+            _invoice_service = InvoiceService(invoice_repository(), store)
         artifact = _invoice_service.generate_document(merchant, posting.transaction_id)
         outcome = {"status": "GENERATED", "filename": artifact.filename,
                    "transaction_id": artifact.transaction_id}
