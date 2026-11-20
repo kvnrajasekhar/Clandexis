@@ -54,10 +54,11 @@ def dashboard_identity(request: Request) -> SessionIdentity:
     merchant = request.session.get("merchant_id")
     if not merchant:
         raise HTTPException(401, "Authentication required")
-    try:
-        UUID(str(merchant))
-    except ValueError:
-        raise HTTPException(401, "Invalid session merchant ID")
+    if settings.DATABASE_BACKEND == "postgres" and settings.is_production:
+        try:
+            UUID(str(merchant))
+        except ValueError:
+            raise HTTPException(401, "Invalid session merchant ID")
 
     requested = request.query_params.getlist("merchant_id")
     if any(value != merchant for value in requested):
@@ -396,9 +397,11 @@ class NoQueryAccessLog(logging.Filter):
 def install_security(app):
     logging.getLogger("uvicorn.access").addFilter(NoQueryAccessLog())
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    same_site = "strict" if (not settings.GOOGLE_CLIENT_ID and not settings.is_production) else "lax"
+    max_age = 3600 if not settings.GOOGLE_CLIENT_ID else 86400
     app.add_middleware(SessionMiddleware,
         secret_key=settings.DASHBOARD_SESSION_SECRET or secrets.token_urlsafe(48),
-        session_cookie="clandexis_session", max_age=86400, same_site="lax",
+        session_cookie="clandexis_session", max_age=max_age, same_site=same_site,
         https_only=settings.is_production)
     app.add_middleware(CORSMiddleware, allow_origins=settings.TRUSTED_ORIGINS,
         allow_credentials=True, allow_methods=["GET", "POST"],

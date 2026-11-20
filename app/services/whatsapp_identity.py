@@ -1,4 +1,4 @@
-"""Real phone resolution with database lookup and backward-compatible allowlist."""
+"""Real phone resolution with database lookup and explicit allowlist."""
 import json
 import logging
 import re
@@ -19,12 +19,17 @@ def normalize_phone(value: str) -> str:
 
 
 def resolve_phone(value: str) -> str | None:
+    """Resolves an incoming phone to its authorized merchant_id.
+
+    Unknown or unapproved senders MUST return None without any ledger access.
+    Never falls back to DASHBOARD_DEMO_MERCHANT_ID.
+    """
     try:
         phone = normalize_phone(value)
     except (ValueError, TypeError, AttributeError):
         return None
 
-    # 1. Backward-compatible demo phone map (used by isolated unit tests)
+    # 1. Backward-compatible demo phone map (used by isolated unit tests and explicit env mapping)
     demo_map_raw = settings.WHATSAPP_DEMO_PHONE_MAP
     if demo_map_raw and demo_map_raw.strip() not in ("", "{}"):
         try:
@@ -34,13 +39,11 @@ def resolve_phone(value: str) -> str | None:
                 return None
             if any(not isinstance(v, str) or not v or "/" in v for v in mapping.values()):
                 return None
-            if phone in mapping:
-                return mapping[phone]
-            return None
+            return mapping.get(phone)
         except Exception:
             return None
 
-    # 2. Real PostgreSQL database lookup
+    # 2. Real PostgreSQL database lookup: strictly approved merchants with matching phone_e164
     if settings.DATABASE_BACKEND == "postgres" and settings.DATABASE_URL:
         try:
             import psycopg
@@ -56,6 +59,5 @@ def resolve_phone(value: str) -> str | None:
             logger.warning("PostgreSQL merchant lookup for %s failed: %s", phone, e)
             return None
 
-    # 3. Default fallback: not found / unregistered
+    # 3. Unknown or unapproved senders MUST return None without any ledger access
     return None
-
