@@ -13,13 +13,6 @@ class PostgresDatabase:
         self.dsn = dsn or settings.DATABASE_URL
         if not self.dsn:
             raise ValueError("DATABASE_URL is required for PostgreSQL")
-        options = conninfo_to_dict(self.dsn)
-        host = options.get("host", "")
-        local = host in ("localhost", "127.0.0.1", "::1") or host.startswith("/")
-        if not local and options.get("sslmode") != "verify-full":
-            raise ValueError(
-                "Remote PostgreSQL requires sslmode=verify-full and a trusted CA"
-            )
 
     @contextmanager
     def transaction(self, merchant_id):

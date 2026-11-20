@@ -97,6 +97,7 @@ class Settings(BaseModel):
         value.strip() for value in os.getenv("TRUSTED_ORIGINS", "").split(",")
         if value.strip() and value.strip() != "*"
     ])
+    GOOGLE_CLIENT_ID: Optional[str] = Field(default_factory=lambda: os.getenv("GOOGLE_CLIENT_ID"))
     DASHBOARD_SESSION_SECRET: str = Field(default_factory=lambda: os.getenv("DASHBOARD_SESSION_SECRET", ""))
     DASHBOARD_DEMO_USERNAME: str = Field(default_factory=lambda: os.getenv("DASHBOARD_DEMO_USERNAME", "demo"))
     DASHBOARD_DEMO_PASSWORD: str = Field(default_factory=lambda: os.getenv("DASHBOARD_DEMO_PASSWORD", ""))
