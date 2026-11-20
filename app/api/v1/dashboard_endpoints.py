@@ -136,6 +136,7 @@ def get_dashboard_candidates(
             candidates.append({
                 "candidate_id": doc.id,
                 "source_message_id": d.get("source_message_id"),
+                "revision": d.get("snapshot_sha256"),
                 "posting_status": d.get("posting_status"),
                 "validation_status": d.get("validation_status"),
                 "hold_source": d.get("hold_source"),
@@ -201,6 +202,44 @@ from pdf_service.gcs_store import GCSArtifactStore
 class ReviewRequest(BaseModel):
     candidate: TransactionCandidate
     note: str = Field(min_length=1)
+
+
+class ClarificationReply(BaseModel):
+    answer: str = Field(min_length=1, max_length=1000)
+    revision: str = Field(min_length=1)
+
+
+@router.post("/candidates/{candidate_id}/clarify")
+def clarify_candidate(candidate_id: str, reply: ClarificationReply,
+                      identity: SessionIdentity = Depends(dashboard_identity)):
+    from app.services.interpreter import InterpreterService
+    from app.services.validator import BusinessValidator
+
+    merchant_id = identity.merchant_id
+    document = ledger.get_db().collection("merchants").document(merchant_id).collection(
+        "transaction_candidates").document(candidate_id).get().to_dict()
+    if not document or document.get("merchant_id") != merchant_id:
+        raise HTTPException(404, "Candidate unavailable")
+    if document["posting_status"] != "NEEDS_REVIEW" or document["snapshot_sha256"] != reply.revision:
+        raise HTTPException(409, "Candidate changed. Refresh before replying.")
+    current = TransactionCandidate.model_validate(document["extracted_snapshot"])
+    facts = current.model_dump_json(exclude={"validation_status", "validation_warnings", "requires_review"})
+    prompt = (f"Update the same transaction with the merchant's reply. Retain known facts. "
+              f"Ask for any remaining missing price or payment details in the merchant's language and script. "
+              f"Use Latin transcription for party names and English product names for catalog lookup. "
+              f"Only derive amounts from stated facts. Leave missing prices and payments null. "
+              f"Current facts: {facts}\nMerchant reply: {reply.answer}")
+    candidates = InterpreterService().interpret(raw_text=prompt).transactions
+    if len(candidates) != 1 or candidates[0].transaction_type != current.transaction_type:
+        raise HTTPException(422, "Reply must clarify this transaction.")
+    corrected = BusinessValidator.validate_candidate(candidates[0])
+    try:
+        result = ledger.review_candidate(merchant_id, candidate_id, reviewed_by=merchant_id,
+            corrected_candidate=corrected, review_note=reply.answer, expected_snapshot_sha256=reply.revision)
+    except ledger.LedgerError as exc:
+        raise HTTPException(409, "Candidate unavailable or details inconsistent. Refresh and check the amounts.") from exc
+    return {"candidate_id": result.candidate_id, "posting_status": result.posting_status,
+            "question": corrected.clarification_question}
 
 
 @router.post("/candidates/{candidate_id}/review")

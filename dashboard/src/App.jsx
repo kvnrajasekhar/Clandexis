@@ -368,10 +368,10 @@ export default function App() {
                             </div>
                             <div className="text-right">
                               <span className="text-base font-bold text-white">
-                                ₹{cand.extracted_snapshot?.total_amount ? cand.extracted_snapshot.total_amount.toFixed(2) : '0.00'}
+                                {cand.extracted_snapshot?.total_amount == null ? "Total unknown" : `₹${cand.extracted_snapshot.total_amount.toFixed(2)}`}
                               </span>
                               <p className="text-[11px] text-slate-400">
-                                Paid: ₹{cand.extracted_snapshot?.amount_paid || 0} • Due: ₹{cand.extracted_snapshot?.credit_amount || 0}
+                                Paid: {cand.extracted_snapshot?.amount_paid ?? "unknown"} • Due: {cand.extracted_snapshot?.credit_amount ?? "unknown"}
                               </p>
                             </div>
                           </div>
@@ -398,10 +398,33 @@ export default function App() {
 
                           {cand.extracted_snapshot?.clarification_question && (
                             <div className="text-[11px] text-sky-300 bg-sky-500/10 border border-sky-500/20 p-2 rounded-lg">
-                              💬 WhatsApp Question: {cand.extracted_snapshot.clarification_question}
+                              💬 {cand.extracted_snapshot.clarification_question}
                             </div>
                           )}
 
+                          {cand.posting_status === 'NEEDS_REVIEW' && (
+                            <form onSubmit={async event => {
+                              event.preventDefault();
+                              const form = event.currentTarget;
+                              const answer = new FormData(form).get('answer').trim();
+                              if (!answer) return;
+                              try {
+                                const res = await apiFetch(`/api/v1/dashboard/candidates/${cand.candidate_id}/clarify`, {
+                                  method: 'POST', headers: {'Content-Type': 'application/json'},
+                                  body: JSON.stringify({answer, revision: cand.revision})
+                                });
+                                const data = await res.json();
+                                if (res.ok) form.reset();
+                                setActionMessage({type: res.ok ? 'info' : 'error', text: res.ok
+                                  ? (data.question || 'Reply saved. Review the updated details before confirming.')
+                                  : (data.detail || 'Unable to save reply.')});
+                                await fetchData();
+                              } catch { setActionMessage({type:'error', text:'Unable to send reply. Refresh and try again.'}); }
+                            }}>
+                              <label>Reply to clarify <input className="bg-slate-800" name="answer" required maxLength={1000} /></label>
+                              <button className="ml-2 underline">Send reply</button>
+                            </form>
+                          )}
                           {(cand.posting_status === 'NEEDS_REVIEW' || cand.validation_status === 'NEEDS_REVIEW') && (
                             <form key={cand.candidate_id} onSubmit={async e => {
                               e.preventDefault();
@@ -430,6 +453,7 @@ export default function App() {
                               Reject / Cancel
                             </button>
                             <button
+                              disabled={cand.posting_status !== "PENDING_CONFIRMATION"}
                               onClick={() => handleConfirmCandidate(cand.candidate_id)}
                               className="px-3 py-1 text-xs font-bold rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-sm transition"
                             >
@@ -685,6 +709,7 @@ export default function App() {
                   {demoResult.staged_candidates?.map(row => (
                     <div key={row.candidate_id} className="mb-2 text-sm">
                       <code>{row.candidate_id}</code> · {row.validation_status} · {row.posting_status}
+                      {row.posting_status === 'NEEDS_REVIEW' && <p>{demoResult.extraction.transactions[row.candidate_index]?.clarification_question} <button className="underline" onClick={() => setActiveTab('overview')}>Answer in Overview</button></p>}
                       <button className="ml-3 underline text-sky-300" onClick={() => setActiveTab('candidates')}>View candidates</button>
                     </div>
                   ))}

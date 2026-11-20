@@ -236,3 +236,24 @@ def test_browser_extraction_receipt_matches_persisted_candidate(app_client, db, 
     assert receipt["posting_status"] == row["posting_status"] == "PENDING_CONFIRMATION"
     assert count(db, mid, "transactions") == 0
     assert row["source_channel"] == "dashboard"
+
+
+def test_clarification_reply_is_scoped_to_candidate_revision(app_client, db, mid, monkeypatch):
+    """Only Gemini is stubbed. A reply reviews the held candidate without posting."""
+    from app.services.interpreter import InterpreterService
+    from app.schemas.transaction import ExtractionResponse
+    client, _, _ = app_client
+    sign_in(client)
+    row = get_confirmation_service().stage(AuthenticatedMerchant(mid), "partial-sale", 0, unstated_sale())
+    monkeypatch.setattr(InterpreterService, "__init__", lambda self: None)
+    monkeypatch.setattr(InterpreterService, "interpret", lambda self, raw_text:
+                        ExtractionResponse(transactions=[sale()]))
+    url = "/api/v1/dashboard/candidates/" + row.candidate_id + "/clarify"
+    payload = {"answer": "Merchant clarified price and payment", "revision": row.revision}
+    assert client.post(url, json=payload | {"revision": "stale"}).status_code == 409
+    assert client.post(url + "?merchant_id=other", json=payload).status_code == 403
+    response = client.post(url, json=payload)
+    assert response.status_code == 200 and response.json()["posting_status"] == "PENDING_CONFIRMATION"
+    assert response.json()["candidate_id"] == row.candidate_id
+    assert client.post(url, json=payload).status_code == 409
+    assert count(db, mid, "transactions") == 0
