@@ -123,19 +123,6 @@ def orchestrate_inbound_message(
 
     # Queries are read-only and intentionally do not alter pending candidate state.
     if message.message_type == MessageType.TEXT:
-        clean_text = (message.text_content or "").strip().lower()
-        if clean_text in ("hi", "hello", "hey", "namaste", "namaskaram", "start", "help"):
-            return None, OutboundMessage(
-                recipient_phone=message.sender_phone,
-                text_content=(
-                    "👋 *Hello! Welcome to Clandexis Invisible ERP.*\n\n"
-                    "You can record transactions using Voice Notes, Bill Photos, or Text:\n"
-                    "• *Sale*: 'Sold 20 Cotton Shirt to Ramesh for 4000 cash, 2000 credit'\n"
-                    "• *Stock*: 'stock status' or 'maal kitna hai'\n"
-                    "• *Khata/Balance*: 'Ramesh balance' or 'udhaar dikhao'\n\n"
-                    "Try sending an audio note or typing a transaction!"
-                ),
-            )
         query = query_service.handle(
             merchant,
             message.text_content or "",
@@ -250,12 +237,14 @@ def orchestrate_inbound_message(
             text_content="Unsupported extraction schema. Nothing posted.",
         )
     if tx.transaction_type in ("query", "unknown"):
+        ai_reply = tx.clarification_question or (
+            "This request cannot post a transaction. Use the dashboard for unsupported reports."
+        )
+        if "nothing posted" not in ai_reply.lower():
+            ai_reply = f"{ai_reply}\n\n(Nothing posted to ledger.)"
         return result, OutboundMessage(
             recipient_phone=message.sender_phone,
-            text_content=(
-                "This request cannot post a transaction. Use the dashboard for "
-                "unsupported reports. Nothing posted."
-            ),
+            text_content=ai_reply,
         )
     if tx.validation_status == "REJECTED":
         return result, OutboundMessage(
@@ -303,16 +292,17 @@ def orchestrate_inbound_message(
             or row.candidate.needs_clarification
             or row.candidate.requires_review
         )
-        latest_question, missing = question(row.candidate, language, script)
+        fallback_question, missing = question(row.candidate, language, script)
+        clarification_text = tx.clarification_question or fallback_question
         conversation.update(
             active_candidate_id=row.candidate_id,
             candidate_revision=str(row.revision),
             expires_at=row.expires_at,
             missing_fields=missing,
-            latest_question=latest_question if review else None,
+            latest_question=clarification_text if review else None,
         )
         body = (
-            latest_question if review else "Please confirm these transaction details."
+            clarification_text if review else "Please confirm these transaction details."
         )
         body += f"\nParty: {row.candidate.buyer_name or 'N/A'}\n"
         for item in row.candidate.items:
