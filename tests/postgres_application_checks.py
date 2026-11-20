@@ -430,8 +430,8 @@ def test_failure_does_not_undo_commit_or_allow_excess_stock(app_client, monkeypa
     large.payments[0].amount = 32000
     mock_pipeline(monkeypatch, large)
     text(client, phone, "sale", "larger")
-    bad = sent[-1].buttons[0].id.split(":")[-1]
-    confirm(client, phone, bad, "larger-confirm")
+    assert not sent[-1].buttons
+    assert "stock" in sent[-1].text_content.lower()
     assert ledger.get_daily_summary(merchant).sales_count == 1
     assert (
         next(
@@ -439,6 +439,26 @@ def test_failure_does_not_undo_commit_or_allow_excess_stock(app_client, monkeypa
         ).current_stock
         == 150
     )
+
+
+def test_unknown_catalog_item_is_held_before_confirm_button(app_client, monkeypatch):
+    client, db, merchant, other, phone, second, sent, root = app_client
+    unknown = sale().model_copy(deep=True)
+    unknown.items[0].item_name = "Mystery Widget"
+    mock_pipeline(monkeypatch, unknown)
+    with db.transaction(merchant) as conn:
+        before = conn.execute(
+            "SELECT count(*) AS n FROM transactions WHERE merchant_id=%s", (merchant,)
+        ).fetchone()["n"]
+
+    text(client, phone, "Sold 50 mystery widgets", "unknown-product")
+
+    assert not sent[-1].buttons
+    assert ledger.get_daily_summary(merchant).sales_count == 0
+    with db.transaction(merchant) as conn:
+        assert conn.execute(
+            "SELECT count(*) AS n FROM transactions WHERE merchant_id=%s", (merchant,)
+        ).fetchone()["n"] == before
 
 
 def test_stock_hindi_context_unknown_sender_and_database_isolation(

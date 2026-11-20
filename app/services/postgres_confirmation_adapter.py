@@ -58,6 +58,14 @@ class PostgresLedgerAdapter:
             and r["expires_at"] > now
         ]
 
+    def confirmation_holds(self, merchant_id, candidate_id, now):
+        try:
+            return ledger.confirmation_holds(
+                merchant_id, candidate_id, db=self.db, now=now
+            )
+        except (ledger.LedgerError, psycopg.Error) as exc:
+            raise ConfirmationError("Candidate unavailable or requires review") from exc
+
     def replace_reviewed_candidate(
         self, merchant_id, candidate_id, expected_revision, candidate, review_note, now
     ):
