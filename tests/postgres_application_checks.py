@@ -526,3 +526,32 @@ def test_provider_failure_can_retry_same_persisted_event(app_client, monkeypatch
     text(client, phone, "Sold 50 shirts", "retry-source")
     assert len(provider_calls) == 2
     assert ledger.get_daily_summary(merchant).sales_total == 0
+
+
+def test_demo_launcher_initializes_environment_before_imports(app_client, tmp_path):
+    import subprocess
+    import sys
+
+    state = tmp_path / "launcher"
+    env = dict(os.environ)
+    env["POSTGRES_DEMO_STATE"] = str(state)
+    env["POSTGRES_DEMO_PHONE"] = "+44" + str(
+        int(uuid4().hex[:10], 16) % 9000000000 + 1000000000
+    )
+    code = """
+import json,os,runpy,uvicorn
+from pathlib import Path
+
+def verify(*args,**kwargs):
+    from config import settings
+    state=json.loads((Path(os.environ['POSTGRES_DEMO_STATE'])/'session.json').read_text())
+    assert settings.DATABASE_BACKEND=='postgres'
+    assert settings.DASHBOARD_DEMO_MERCHANT_ID==state['merchant_id']
+    assert settings.DASHBOARD_SESSION_SECRET==state['session_secret']
+    assert settings.DASHBOARD_DEMO_PASSWORD==state['password']
+    print('LAUNCHER_VERIFIED')
+uvicorn.run=verify
+runpy.run_path('scripts/run_postgres_demo.py',run_name='__main__')
+"""
+    result = subprocess.check_output([sys.executable, "-c", code], env=env, text=True)
+    assert "LAUNCHER_VERIFIED" in result

@@ -55,4 +55,6 @@ The supplied Cloud SQL instance name is clandexis:asia-south1:clandexis. Databas
 
 The old Cloud Run deployment remains untrusted and Meta remains disconnected. Cloud cutover needs the corrected revision, SQL runtime configuration, two-merchant isolation tests and real-phone verification before restoring the subscription.
 
-Final local test results were 7 PostgreSQL application checks, 1 real Firestore-to-PostgreSQL transfer/resume check and 134 existing Firestore checks, all passing. The PostgreSQL schema separately passed its 26 SQL assertions. Cloud testing remains deferred at the user’s request.
+Final local test results were 8 PostgreSQL application checks, 1 real Firestore-to-PostgreSQL transfer/resume check and 134 existing Firestore checks, all passing. The PostgreSQL schema separately passed its 26 SQL assertions. Cloud testing remains deferred at the user’s request.
+
+A final normal-entry restart exposed an early application import in the demo launcher. The launcher now applies all backend/session settings before importing application modules. A separate-process regression test verifies that initialization order, and the running server was rechecked with HTTP 200 login, PostgreSQL health metadata and the preserved financial totals.

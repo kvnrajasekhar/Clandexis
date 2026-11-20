@@ -3,6 +3,7 @@
 import json
 import os
 import secrets
+import re
 import socket
 import subprocess
 from pathlib import Path
@@ -23,8 +24,6 @@ def main():
         raise SystemExit(
             "Set DATABASE_URL to the isolated local PostgreSQL demo database."
         )
-    from app.services.whatsapp_identity import normalize_phone
-
     phone = os.environ.get("POSTGRES_DEMO_PHONE")
     if not phone:
         approved = json.loads(os.environ.get("WHATSAPP_DEMO_PHONE_MAP", "{}"))
@@ -33,8 +32,14 @@ def main():
                 "Set POSTGRES_DEMO_PHONE to the explicitly approved demo sender."
             )
         phone = next(iter(approved))
-    phone = normalize_phone(phone)
-    state = Path.home() / ".local/state/clandexis-postgres-demo"
+    if not re.fullmatch(r"\+[1-9][0-9]{7,14}", phone):
+        raise SystemExit("The configured approved demo phone must be E.164.")
+    state = Path(
+        os.environ.get(
+            "POSTGRES_DEMO_STATE",
+            str(Path.home() / ".local/state/clandexis-postgres-demo"),
+        )
+    ).expanduser()
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         with socket.create_connection(
