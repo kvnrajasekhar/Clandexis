@@ -13,6 +13,7 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Requ
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 
+from agent_orchestrator import AgentOrchestrator
 from config import settings
 from models.canonical import InboundMessage, OutboundMessage
 from .meta_whatsapp_handler import MetaWhatsAppService
@@ -22,13 +23,15 @@ logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger("webhook-service")
 
 meta_service: Optional[MetaWhatsAppService] = None
+orchestrator: Optional[AgentOrchestrator] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global meta_service
+    global meta_service, orchestrator
     meta_service = MetaWhatsAppService()
-    logger.info("MetaWhatsAppService initialized.")
+    orchestrator = AgentOrchestrator()
+    logger.info("MetaWhatsAppService and AgentOrchestrator initialized.")
     yield
     if meta_service:
         await meta_service.close()
@@ -129,11 +132,73 @@ async def handle_meta_webhook(
 
 async def process_inbound_message(message: InboundMessage):
     """
-    Background worker passing normalized message to Agent Orchestrator.
+    Background worker passing normalized message to Agent Orchestrator
+    and dispatching resulting outbound messages back to WhatsApp.
     """
-    logger.info(f"Processing inbound message {message.message_id} in background pipeline...")
-    # This invokes the agent-orchestrator router / extractor
-    # (Dev 2 / Agent Orchestrator pipeline)
+    global meta_service, orchestrator
+    if not orchestrator:
+        orchestrator = AgentOrchestrator()
+    if not meta_service:
+        meta_service = MetaWhatsAppService()
+
+    logger.info(f"Processing inbound message {message.message_id} from {message.sender_phone}...")
+
+    # 1. Mark message as read (WhatsApp blue tick receipt)
+    try:
+        await meta_service.mark_message_as_read(message.message_id)
+    except Exception as e:
+        logger.warning(f"Failed to mark message {message.message_id} as read: {e}")
+
+    # 2. Download media if present (audio voice note / bill image)
+    media_bytes = None
+    if message.media_id:
+        try:
+            media_bytes = await meta_service.download_media_bytes(message.media_id)
+        except Exception as e:
+            logger.warning(f"Failed to download media {message.media_id}: {e}")
+
+    # 3. Process message through application logic (Agent Orchestrator)
+    try:
+        outbound_messages = await orchestrator.handle_inbound_message(message, media_bytes=media_bytes)
+    except Exception as e:
+        logger.error(f"Error processing inbound message through Agent Orchestrator: {e}", exc_info=True)
+        outbound_messages = [
+            OutboundMessage(
+                recipient_phone=message.sender_phone,
+                channel=message.channel,
+                text_content="⚠️ क्षमा करें, आपके संदेश को प्रोसेस करने में समस्या आई। कृपया पुनः प्रयास करें।",
+            )
+        ]
+
+    # 4. Dispatch outbound response back through WhatsApp
+    dispatched_responses = []
+    for outbound in outbound_messages:
+        try:
+            resp = await meta_service.dispatch_outbound(outbound)
+            dispatched_responses.append(resp)
+            logger.info(f"Dispatched outbound {outbound.message_type} to {outbound.recipient_phone}")
+        except Exception as e:
+            logger.error(f"Failed to dispatch outbound message to {outbound.recipient_phone}: {e}")
+
+    return outbound_messages
+
+
+# ==============================================================================
+# Synchronous Inbound Processing (for testing & internal orchestration)
+# ==============================================================================
+
+@app.post("/api/v1/process-inbound")
+async def process_inbound_direct(message: InboundMessage):
+    """
+    Direct synchronous endpoint to process an InboundMessage and return the Outbound responses.
+    """
+    outbounds = await process_inbound_message(message)
+    return {
+        "status": "processed",
+        "inbound_message_id": message.message_id,
+        "outbound_count": len(outbounds),
+        "outbound_messages": [o.model_dump(mode="json") for o in outbounds],
+    }
 
 
 # ==============================================================================

@@ -320,6 +320,10 @@ class MetaWhatsAppService:
         """
         Sends read status receipt to turn tick marks blue on WhatsApp.
         """
+        if not self.token or self.token.startswith("your_") or self.token == "fake_token":
+            logger.info(f"[SIMULATION] Message {message_id} marked as read (blue ticks).")
+            return True
+
         endpoint = f"{self.graph_base_url}/{self.api_version}/{self.phone_number_id}/messages"
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -341,6 +345,17 @@ class MetaWhatsAppService:
         """
         Internal POST call to Meta Graph API messages endpoint.
         """
+        if not self.token or self.token.startswith("your_") or self.token == "fake_token":
+            import uuid
+            from models.whatsapp_meta import MetaSentMessageItem
+            sim_id = f"wamid.sim_{uuid.uuid4().hex[:12]}"
+            logger.info(f"[SIMULATION] Outbound message dispatched to {payload.to} with id={sim_id}")
+            return MetaSendResponse(
+                messaging_product="whatsapp",
+                contacts=[{"input": payload.to, "wa_id": payload.to}],
+                messages=[MetaSentMessageItem(id=sim_id)],
+            )
+
         endpoint = f"{self.graph_base_url}/{self.api_version}/{self.phone_number_id}/messages"
         headers = {
             "Authorization": f"Bearer {self.token}",

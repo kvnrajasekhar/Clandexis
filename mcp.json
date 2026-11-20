@@ -1,16 +1,8 @@
 {
   "mcpServers": {
-    "whatsapp_business_tools": {
-      "url": "https://mcp.facebook.com/whatsapp_business_tools"
-    },
-    "google-cloud-data": {
+    "whatsapp_cloud_api": {
       "command": "python3",
-      "args": ["-m", "google.cloud.data_agent_kit"],
-      "env": {
-        "GCP_PROJECT": "clandexis",
-        "BIGQUERY_DATASET": "clandexis_analytics",
-        "FIRESTORE_DATABASE": "(default)"
-      }
+      "args": ["/Users/jamamacbook/Documents/clandexis/invisible-erp/mcp_whatsapp_server.py"]
     }
   }
 }
