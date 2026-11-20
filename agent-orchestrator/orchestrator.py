@@ -10,6 +10,12 @@ from app.services.confirmation import (
     get_confirmation_service,
 )
 from app.services.query_service import QueryService
+from app.services.whatsapp_response_formatter import (
+    candidate_summary,
+    copy_for,
+    hold_message,
+    posting_summary,
+)
 from models.canonical import (
     CanonicalButton,
     InboundMessage,
@@ -21,19 +27,11 @@ pipeline = None  # Lazy: callbacks and read-only queries never initialize Gemini
 query_service = QueryService()
 
 
-def posting_outbound(phone: str, result: PostingResult) -> OutboundMessage:
-    balances = ", ".join(
-        f"{sku}: {quantity}" for sku, quantity in result.inventory_balance.items()
-    )
+def posting_outbound(phone: str, result: PostingResult, language: str = "en",
+                     script: str = "Latin") -> OutboundMessage:
     return OutboundMessage(
         recipient_phone=phone,
-        text_content=(
-            f"Posting status: {result.posting_status}\n"
-            f"Transaction: {result.transaction_id}\n"
-            f"Amount paid: {result.amount_paid}\n"
-            f"Credit outstanding: {result.credit_outstanding}\n"
-            f"Inventory balance: {balances or 'No inventory movement'}"
-        ),
+        text_content=posting_summary(result, language, script),
     )
 
 
@@ -111,10 +109,11 @@ def orchestrate_inbound_message(
                 expires_at=None,
             )
             if isinstance(result, PostingResult):
-                return result, posting_outbound(message.sender_phone, result)
+                return result, posting_outbound(message.sender_phone, result, language, script)
+            labels = copy_for(language, script)
             return None, OutboundMessage(
                 recipient_phone=message.sender_phone,
-                text_content=f"Posting status: {result}. Nothing posted.",
+                text_content=labels["cancelled"],
             )
     except ConfirmationError as exc:
         return None, OutboundMessage(
@@ -292,8 +291,15 @@ def orchestrate_inbound_message(
             or row.candidate.needs_clarification
             or row.candidate.requires_review
         )
+        holds = []
+        preflight = getattr(service.ledger, "confirmation_holds", None)
+        if not review and preflight:
+            holds = preflight(merchant.merchant_id, row.candidate_id, service.clock())
+            review = bool(holds)
         fallback_question, missing = question(row.candidate, language, script)
-        clarification_text = tx.clarification_question or fallback_question
+        clarification_text = hold_message(holds, language, script) if holds else (
+            fallback_question or tx.clarification_question
+        )
         conversation.update(
             active_candidate_id=row.candidate_id,
             candidate_revision=str(row.revision),
@@ -301,40 +307,28 @@ def orchestrate_inbound_message(
             missing_fields=missing,
             latest_question=clarification_text if review else None,
         )
-        body = (
-            clarification_text if review else "Please confirm these transaction details."
-        )
-        body += f"\nParty: {row.candidate.buyer_name or 'N/A'}\n"
-        for item in row.candidate.items:
-            body += f"{item.item_name}: {item.quantity} × {item.unit_price}\n"
-        for payment in row.candidate.payments:
-            body += f"{payment.method}: {payment.amount}\n"
-        body += f"Paid: {row.candidate.amount_paid}\n"
-        body += f"Credit: {row.candidate.credit_amount}\n"
-        body += f"Total: {row.candidate.currency} {row.candidate.total_amount}\n"
-        body += f"Candidate: {row.candidate_id}\nNothing posted yet."
+        summary = candidate_summary(row.candidate, row.candidate_id, language, script,
+                                    review=review)
+        body = f"{clarification_text}\n\n{summary}" if review else summary
         if review:
-            body += (
-                "\nCorrection or explicit review and revalidation is required "
-                "before Confirm can post."
-            )
             return result, OutboundMessage(
                 recipient_phone=message.sender_phone, text_content=body
             )
+        labels = copy_for(language, script)
         return result, OutboundMessage(
             recipient_phone=message.sender_phone,
             message_type=MessageType.INTERACTIVE_BUTTON,
-            interactive_header="Confirm Transaction",
+            interactive_header=labels["confirm_heading"],
             interactive_body=body,
             interactive_footer="Clandexis",
             buttons=[
                 CanonicalButton(
                     id=button_id(row.candidate_id, "confirm"),
-                    title="✅ Confirm (हाँ)",
+                    title=labels["confirm"],
                 ),
                 CanonicalButton(
                     id=button_id(row.candidate_id, "cancel"),
-                    title="❌ Cancel (रद्द)",
+                    title=labels["cancel"],
                 ),
             ],
         )

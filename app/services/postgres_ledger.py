@@ -186,6 +186,36 @@ def get_candidate_record(merchant_id, candidate_id, *, db=None):
         return _candidate_record(_candidate(conn, merchant_id, candidate_id))
 
 
+def confirmation_holds(merchant_id, candidate_id, *, db=None, now=None):
+    """Read-only catalog and stock preflight used before offering WhatsApp Confirm."""
+    db = db or get_db()
+    now = now or datetime.now(rules.IST)
+    with db.transaction(merchant_id) as conn:
+        merchant = _merchant(conn, merchant_id)
+        candidate = _candidate(conn, merchant_id, candidate_id)
+        snap, posting = _assessed(candidate["extracted_snapshot"], merchant)
+        if posting != PostingStatus.PENDING_CONFIRMATION:
+            return snap.validation_warnings or ["Candidate requires review"]
+        try:
+            plan = rules._plan_from_snapshot(snap, now.astimezone(rules.IST).date())
+            products, _ = _catalog(conn, merchant_id, plan)
+        except (rules._Hold, rules._Reject) as exc:
+            return list(exc.reasons)
+        levels = {
+            str(row["product_id"]): row["quantity_on_hand"]
+            for row in conn.execute(
+                "SELECT * FROM inventory_balances WHERE merchant_id=%s", (merchant_id,)
+            ).fetchall()
+        }
+        for line in plan.lines:
+            if plan.kind != "sale":
+                continue
+            product_id = str(products[line.item_name]["id"])
+            if levels.get(product_id, Decimal(0)) - line.quantity < 0:
+                return ["Insufficient stock"]
+        return []
+
+
 def list_candidates(merchant_id, *, db=None):
     with (db or get_db()).transaction(merchant_id) as conn:
         _merchant(conn, merchant_id)
