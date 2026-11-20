@@ -1,0 +1,107 @@
+"""
+Centralized Configuration & Secrets Management for Clandexis Invisible ERP.
+Loads and validates all environment variables from .env file.
+"""
+
+import os
+from functools import lru_cache
+from pathlib import Path
+from typing import Optional
+
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+
+# Locate and load the root .env file automatically
+BASE_DIR = Path(__file__).resolve().parent
+ENV_PATH = BASE_DIR / ".env"
+if ENV_PATH.exists():
+    load_dotenv(dotenv_path=ENV_PATH, override=True)
+else:
+    load_dotenv(override=True)
+
+
+class Settings(BaseModel):
+    # ==========================================================================
+    # Google Cloud Platform (GCP)
+    # ==========================================================================
+    GCP_PROJECT_ID: str = Field(default_factory=lambda: os.getenv("GCP_PROJECT_ID", "clandexis"))
+    GCP_REGION: str = Field(default_factory=lambda: os.getenv("GCP_REGION", "asia-south1"))
+    FIRESTORE_DATABASE: str = Field(default_factory=lambda: os.getenv("FIRESTORE_DATABASE", "(default)"))
+    BIGQUERY_DATASET: str = Field(default_factory=lambda: os.getenv("BIGQUERY_DATASET", "clandexis_analytics"))
+    GOOGLE_APPLICATION_CREDENTIALS: Optional[str] = Field(
+        default_factory=lambda: os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    )
+
+    # ==========================================================================
+    # Google AI & Gemini Models
+    # ==========================================================================
+    GEMINI_API_KEY: Optional[str] = Field(default_factory=lambda: os.getenv("GEMINI_API_KEY"))
+    ROUTER_MODEL: str = Field(default_factory=lambda: os.getenv("ROUTER_MODEL", "gemini-3.5-flash-lite"))
+    EXTRACTOR_MODEL: str = Field(default_factory=lambda: os.getenv("EXTRACTOR_MODEL", "gemini-3.8-flash"))
+    TTS_MODEL: str = Field(default_factory=lambda: os.getenv("TTS_MODEL", "gemini-3.8-flash-tts"))
+    ANALYST_MODEL: str = Field(default_factory=lambda: os.getenv("ANALYST_MODEL", "gemini-4-carbon"))
+
+    # ==========================================================================
+    # Meta WhatsApp Business Cloud API (Graph API v21.0)
+    # ==========================================================================
+    META_WHATSAPP_TOKEN: Optional[str] = Field(default_factory=lambda: os.getenv("META_WHATSAPP_TOKEN"))
+    META_PHONE_NUMBER_ID: Optional[str] = Field(default_factory=lambda: os.getenv("META_PHONE_NUMBER_ID"))
+    META_WABA_ID: Optional[str] = Field(default_factory=lambda: os.getenv("META_WABA_ID"))
+    META_VERIFY_TOKEN: str = Field(
+        default_factory=lambda: os.getenv("META_VERIFY_TOKEN", "clandexis_meta_webhook_verify_token_2026")
+    )
+    META_APP_SECRET: Optional[str] = Field(default_factory=lambda: os.getenv("META_APP_SECRET"))
+    META_API_VERSION: str = Field(default_factory=lambda: os.getenv("META_API_VERSION", "v21.0"))
+    META_GRAPH_BASE_URL: str = Field(default_factory=lambda: os.getenv("META_GRAPH_BASE_URL", "https://graph.facebook.com"))
+
+    # ==========================================================================
+    # Twilio WhatsApp Sandbox (Backup Channel Adapter)
+    # ==========================================================================
+    TWILIO_ACCOUNT_SID: Optional[str] = Field(default_factory=lambda: os.getenv("TWILIO_ACCOUNT_SID"))
+    TWILIO_AUTH_TOKEN: Optional[str] = Field(default_factory=lambda: os.getenv("TWILIO_AUTH_TOKEN"))
+    TWILIO_WHATSAPP_NUMBER: Optional[str] = Field(
+        default_factory=lambda: os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
+    )
+
+    # ==========================================================================
+    # Google Cloud KMS Attestation & Cloud Storage
+    # ==========================================================================
+    KMS_KEY_RING: str = Field(default_factory=lambda: os.getenv("KMS_KEY_RING", "clandexis-attestation-ring"))
+    KMS_KEY_NAME: str = Field(default_factory=lambda: os.getenv("KMS_KEY_NAME", "ledger-signing-key"))
+    KMS_LOCATION: str = Field(default_factory=lambda: os.getenv("KMS_LOCATION", "asia-south1"))
+    GCS_BUCKET_NAME: str = Field(default_factory=lambda: os.getenv("GCS_BUCKET_NAME", "clandexis-pdf-artifacts"))
+
+    # ==========================================================================
+    # Service Runtime & Safety Gate Parameters
+    # ==========================================================================
+    ENVIRONMENT: str = Field(default_factory=lambda: os.getenv("ENVIRONMENT", "development"))
+    PORT: int = Field(default_factory=lambda: int(os.getenv("PORT", "8080")))
+    HOST: str = Field(default_factory=lambda: os.getenv("HOST", "0.0.0.0"))
+    LOG_LEVEL: str = Field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
+    CONFIDENCE_THRESHOLD: float = Field(
+        default_factory=lambda: float(os.getenv("CONFIDENCE_THRESHOLD", "0.85"))
+    )
+    HIGH_CREDIT_THRESHOLD: float = Field(
+        default_factory=lambda: float(os.getenv("HIGH_CREDIT_THRESHOLD", "5000.00"))
+    )
+
+    @property
+    def is_production(self) -> bool:
+        return self.ENVIRONMENT.lower() in ("production", "prod")
+
+    @property
+    def meta_messages_endpoint(self) -> str:
+        return f"{self.META_GRAPH_BASE_URL}/{self.META_API_VERSION}/{self.META_PHONE_NUMBER_ID}/messages"
+
+    def meta_media_endpoint(self, media_id: str) -> str:
+        return f"{self.META_GRAPH_BASE_URL}/{self.META_API_VERSION}/{media_id}"
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    """Returns singleton instance of validated settings."""
+    return Settings()
+
+
+# Default instance for convenient imports
+settings = get_settings()

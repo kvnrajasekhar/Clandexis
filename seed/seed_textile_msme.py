@@ -10,6 +10,7 @@ import os
 import sys
 from datetime import datetime, timezone
 
+from config import settings
 from models.firestore_schema import (
     InventoryItem,
     Merchant,
@@ -23,8 +24,8 @@ def seed_demo_data(dry_run: bool = False):
         business_name="Sri Balaji Textiles",
         owner_name="Rajesh Kumar",
         preferred_lang="hi",
-        high_credit_threshold=5000.0,
-        whatsapp_phone_number_id=os.getenv("META_PHONE_NUMBER_ID", "15550269999"),
+        high_credit_threshold=settings.HIGH_CREDIT_THRESHOLD,
+        whatsapp_phone_number_id=settings.META_PHONE_NUMBER_ID or "15550269999",
         whatsapp_verified_at=datetime.now(timezone.utc),
     )
 
@@ -79,14 +80,14 @@ def seed_demo_data(dry_run: bool = False):
     print(f"Parties ({len(parties)}): {[p.display_name for p in parties]}")
     print(f"Inventory ({len(inventory)}): {[f'{i.item_name}: {i.current_stock} {i.unit} @ ₹{i.default_unit_price}' for i in inventory]}")
 
-    if dry_run or not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+    if dry_run or not settings.GOOGLE_APPLICATION_CREDENTIALS:
         print("\n[INFO] Running in local simulation mode (Dry Run).")
-        print("To seed live Firestore, set GOOGLE_APPLICATION_CREDENTIALS or run inside Cloud Run.")
+        print("To seed live Firestore, set GOOGLE_APPLICATION_CREDENTIALS in .env or run inside Cloud Run.")
         return
 
     try:
         from google.cloud import firestore
-        db = firestore.Client(project=os.getenv("GCP_PROJECT_ID", "clandexis"))
+        db = firestore.Client(project=settings.GCP_PROJECT_ID)
         
         # 1. Seed Merchant
         m_ref = db.collection("merchants").document(merchant.merchant_id)

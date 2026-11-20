@@ -9,6 +9,7 @@ import os
 from typing import Any, Dict, List, Optional
 import httpx
 
+from config import settings
 from models.canonical import CanonicalButton, ChannelType, InboundMessage, MessageType, OutboundMessage
 from models.whatsapp_meta import (
     MetaInteractiveAction,
@@ -29,10 +30,6 @@ from models.whatsapp_meta import (
 
 logger = logging.getLogger("meta-whatsapp-handler")
 
-META_API_VERSION = "v21.0"
-META_GRAPH_BASE_URL = f"https://graph.facebook.com/{META_API_VERSION}"
-
-
 class MetaWhatsAppService:
     def __init__(
         self,
@@ -40,9 +37,11 @@ class MetaWhatsAppService:
         phone_number_id: Optional[str] = None,
         app_secret: Optional[str] = None,
     ):
-        self.token = token or os.getenv("META_WHATSAPP_TOKEN", "")
-        self.phone_number_id = phone_number_id or os.getenv("META_PHONE_NUMBER_ID", "")
-        self.app_secret = app_secret or os.getenv("META_APP_SECRET", "")
+        self.token = token or settings.META_WHATSAPP_TOKEN or ""
+        self.phone_number_id = phone_number_id or settings.META_PHONE_NUMBER_ID or ""
+        self.app_secret = app_secret or settings.META_APP_SECRET or ""
+        self.api_version = settings.META_API_VERSION
+        self.graph_base_url = settings.META_GRAPH_BASE_URL
         self.http_client = httpx.AsyncClient(timeout=30.0)
 
     async def close(self):
@@ -166,7 +165,7 @@ class MetaWhatsAppService:
         """
         Queries Meta Graph API to resolve the temporary download URL for a media asset.
         """
-        endpoint = f"{META_GRAPH_BASE_URL}/{media_id}"
+        endpoint = f"{self.graph_base_url}/{self.api_version}/{media_id}"
         headers = {"Authorization": f"Bearer {self.token}"}
         try:
             resp = await self.http_client.get(endpoint, headers=headers)
@@ -321,7 +320,7 @@ class MetaWhatsAppService:
         """
         Sends read status receipt to turn tick marks blue on WhatsApp.
         """
-        endpoint = f"{META_GRAPH_BASE_URL}/{self.phone_number_id}/messages"
+        endpoint = f"{self.graph_base_url}/{self.api_version}/{self.phone_number_id}/messages"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
@@ -342,7 +341,7 @@ class MetaWhatsAppService:
         """
         Internal POST call to Meta Graph API messages endpoint.
         """
-        endpoint = f"{META_GRAPH_BASE_URL}/{self.phone_number_id}/messages"
+        endpoint = f"{self.graph_base_url}/{self.api_version}/{self.phone_number_id}/messages"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",

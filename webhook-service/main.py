@@ -13,11 +13,12 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Requ
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 
+from config import settings
 from models.canonical import InboundMessage, OutboundMessage
 from .meta_whatsapp_handler import MetaWhatsAppService
 from .security import verify_meta_signature
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger("webhook-service")
 
 meta_service: Optional[MetaWhatsAppService] = None
@@ -78,7 +79,7 @@ async def verify_meta_webhook(
     Webhook verification challenge from Meta Developers portal.
     Must return hub.challenge if hub.verify_token matches META_VERIFY_TOKEN.
     """
-    expected_verify_token = os.getenv("META_VERIFY_TOKEN", "clandexis_meta_webhook_verify_token_2026")
+    expected_verify_token = settings.META_VERIFY_TOKEN
     
     if hub_mode == "subscribe" and hub_verify_token == expected_verify_token:
         logger.info("Meta webhook verified successfully.")
@@ -102,7 +103,7 @@ async def handle_meta_webhook(
     4. Returns HTTP 200 immediately.
     """
     raw_body = await request.body()
-    app_secret = os.getenv("META_APP_SECRET", "")
+    app_secret = settings.META_APP_SECRET or ""
 
     # 1. Verify HMAC Signature
     if not verify_meta_signature(raw_body, x_hub_signature_256, app_secret):
@@ -160,5 +161,4 @@ async def send_outbound_message(outbound: OutboundMessage):
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", "8080"))
-    uvicorn.run("webhook-service.main:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("webhook_service.main:app", host=settings.HOST, port=settings.PORT, reload=not settings.is_production)
