@@ -147,7 +147,7 @@ async def process_inbound_message(message: InboundMessage):
     """
     logger.info(f"Processing inbound message {message.message_id} in background pipeline...")
     try:
-        from agent_orchestrator import orchestrate_inbound_message
+        from app.services.whatsapp_conversation import process_whatsapp_message
         media_bytes = None
         if message.message_type in (MessageType.AUDIO, MessageType.IMAGE, MessageType.DOCUMENT):
             if meta_service is None:
@@ -159,7 +159,7 @@ async def process_inbound_message(message: InboundMessage):
                     recipient_phone=message.sender_phone,
                     text_content="Could not read the attachment. Please resend it or send the details as text."))
                 return
-        result, outbound = orchestrate_inbound_message(message, media_bytes=media_bytes)
+        result, outbound = process_whatsapp_message(message, media_bytes=media_bytes)
         logger.info("Orchestration completed for %s (%s)", message.message_id, type(result).__name__)
         
         # Generate only after a successful ledger result; all side effects are

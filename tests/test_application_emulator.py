@@ -277,6 +277,7 @@ def test_mapped_voice_to_gemini_and_confirmation(app_client, db, mid, monkeypatc
     phone = "+14155550123"
     ref = db.collection("merchants").document(mid)
     ref.update({"authorized_phones": [phone]})
+    monkeypatch.setattr(application.settings, "WHATSAPP_DEMO_PHONE_MAP", json.dumps({phone: mid}))
     generated = []
     media = b"OggS fixture audio bytes"
 
@@ -307,11 +308,13 @@ def test_mapped_voice_to_gemini_and_confirmation(app_client, db, mid, monkeypatc
         {"id": "waba", "changes": [{"field": "messages", "value": value}]}]}
     other = db.collection("merchants").document("also-linked")
     other.set({"authorized_phones": [phone]})
+    monkeypatch.setattr(application.settings, "WHATSAPP_DEMO_PHONE_MAP", json.dumps({phone: mid, "+14155550124": mid}))
     try:
         assert signed_callback(client, payload).json()["messages_received"] == 0
         assert not requests and not meta.sent
     finally:
         other.delete()
+    monkeypatch.setattr(application.settings, "WHATSAPP_DEMO_PHONE_MAP", json.dumps({phone: mid}))
     assert signed_callback(client, payload).json()["messages_received"] == 1
     assert requests == ["/v21.0/media42", "/audio"]
     assert [(part.data, part.mime_type) for part in generated] == [(media, "audio/ogg")]

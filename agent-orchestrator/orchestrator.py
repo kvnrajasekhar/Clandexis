@@ -32,20 +32,38 @@ def posting_outbound(phone: str, result: PostingResult) -> OutboundMessage:
         f"Inventory balance: {balances or 'No inventory movement'}"))
 
 
-def orchestrate_inbound_message(message: InboundMessage, *, media_bytes: bytes | None = None):
+def orchestrate_inbound_message(message: InboundMessage, *, media_bytes: bytes | None = None, conversation: dict | None = None):
     """Canonical input must come from the authenticated, merchant-resolved adapter.
 
     Result is ProcessingResult for extraction, PostingResult for commit, None for
     cancellation/errors. Transport dispatch occurs only after this function returns.
     """
     global pipeline
+    if message.message_type not in (MessageType.TEXT, MessageType.AUDIO, MessageType.IMAGE,
+            MessageType.DOCUMENT, MessageType.INTERACTIVE_BUTTON, MessageType.INTERACTIVE_LIST):
+        return None, OutboundMessage(recipient_phone=message.sender_phone,
+            text_content="Unsupported message type. Nothing posted.")
+    conversation = conversation if conversation is not None else {}
+    from app.services.conversation_language import preference, question
+    language, script = preference(message.text_content or "", conversation)
+    conversation.update(detected_language=language, script_preference=script)
     merchant = AuthenticatedMerchant(message.tenant_id, actor_phone=message.sender_phone)
     try:
         service = get_confirmation_service()
+        if message.message_type == MessageType.TEXT and (message.text_content or "").strip().upper() in ("YES", "NO"):
+            raise ConfirmationError("Use the Confirm or Cancel button for the specific candidate.")
         reply = service.parse_reply(merchant, message)
         if reply:
             candidate_id, action = reply
+            if conversation.get("active_candidate_id") not in (None, candidate_id):
+                raise ConfirmationError("Another candidate is active. Continue or cancel it first.")
+            if action == "confirm" and conversation.get("active_candidate_id") == candidate_id:
+                current = service.ledger.get_candidate(merchant.merchant_id, candidate_id)
+                if conversation.get("candidate_revision") != str(current.revision):
+                    raise ConfirmationError("Candidate changed. Review its latest revision in the dashboard.")
             result = service.handle_confirmation(merchant, candidate_id, action, message.message_id)
+            conversation["last_candidate_id"] = candidate_id
+            conversation.update(active_candidate_id=None, latest_question=None, missing_fields=[], candidate_revision=None, expires_at=None)
             if isinstance(result, PostingResult):
                 return result, posting_outbound(message.sender_phone, result)
             return None, OutboundMessage(recipient_phone=message.sender_phone,
@@ -58,16 +76,29 @@ def orchestrate_inbound_message(message: InboundMessage, *, media_bytes: bytes |
             r"\b(pdf|ledgers?|reports?)\b", message.text_content or "", re.IGNORECASE):
         return None, OutboundMessage(recipient_phone=message.sender_phone,
             text_content="Please use the authenticated dashboard for ledger reports and invoice downloads. Nothing posted.")
-    active = service.ledger.active_candidates(merchant.merchant_id, service.clock())
-    pending_review = [r for r in active if r.candidate.needs_clarification or r.candidate.requires_review]
-    if len(pending_review) > 1:
-        return None, OutboundMessage(recipient_phone=message.sender_phone,
-            text_content="Multiple candidates need review. Resolve the specific candidate in the dashboard. Nothing posted.")
-    reviewing = pending_review[0] if pending_review and message.message_type == MessageType.TEXT else None
+    reviewing = None
+    if conversation.get("active_candidate_id"):
+        row = service.ledger.get_candidate(merchant.merchant_id, conversation["active_candidate_id"])
+        if row.status != "AWAITING_CONFIRMATION" or row.expires_at <= service.clock():
+            conversation.update(active_candidate_id=None, latest_question=None, missing_fields=[], candidate_revision=None, expires_at=None)
+            return None, OutboundMessage(recipient_phone=message.sender_phone,
+                text_content="The pending candidate is closed or expired. Please resend your transaction.")
+        if (message.text_content or "").strip().lower() == "continue":
+            return None, OutboundMessage(recipient_phone=message.sender_phone,
+                text_content=conversation.get("latest_question") or f"Review candidate {row.candidate_id} and use its Confirm or Cancel button.")
+        if (not row.candidate.needs_clarification and not row.candidate.requires_review) or re.search(
+                r"\b(sold|sell|sale|ammanu|ammnu|purchase|bought|stock|repaid|becha|bechi)\b|అమ్మ|बेच", message.text_content or "", re.I):
+            return None, OutboundMessage(recipient_phone=message.sender_phone,
+                text_content=f"Continue candidate {row.candidate_id} or cancel it before starting another transaction.",
+                message_type=MessageType.INTERACTIVE_BUTTON, interactive_body=f"Continue the pending candidate {row.candidate_id}, or cancel it and resend the new transaction.",
+                buttons=[CanonicalButton(id=button_id(row.candidate_id, "cancel"), title="Cancel pending")])
+        reviewing = row
     raw_text = message.text_content
     if reviewing:
         raw_text = ("Clarify this same transaction using the merchant reply. Preserve buyer and items. "
                     "Leave unstated price and payment details null. Ask for remaining missing details. "
+                    f"Use language {language} and script {script}. Ask one specific missing-field question at a time. "
+                    f"Reassess missing_fields and clarification flags after each reply. "
                     f"Current facts: {reviewing.candidate.model_dump_json()}\nMerchant reply: {message.text_content}")
     if pipeline is None:
         from app.pipeline import PipelineService
@@ -89,6 +120,9 @@ def orchestrate_inbound_message(message: InboundMessage, *, media_bytes: bytes |
         return result, OutboundMessage(recipient_phone=message.sender_phone,
                                        text_content="Please send one transaction at a time. Nothing posted.")
     tx = transactions[0]
+    if tx.schema_version != "1.1":
+        return result, OutboundMessage(recipient_phone=message.sender_phone,
+            text_content="Unsupported extraction schema. Nothing posted.")
     if tx.transaction_type in ("query", "unknown"):
         return result, OutboundMessage(recipient_phone=message.sender_phone,
             text_content="This request cannot post a transaction. Use the dashboard for reports. Nothing posted.")
@@ -99,16 +133,32 @@ def orchestrate_inbound_message(message: InboundMessage, *, media_bytes: bytes |
         if reviewing:
             if tx.transaction_type != reviewing.candidate.transaction_type or tx.buyer_name != reviewing.candidate.buyer_name:
                 raise ConfirmationError("Reply changed the buyer or transaction type. Review the candidate in the dashboard.")
-            if tx.validation_status != "ACCEPTED" or tx.needs_clarification or tx.requires_review:
-                return result, OutboundMessage(recipient_phone=message.sender_phone,
-                    text_content=tx.clarification_question or "Price and payment details are still required. Nothing posted.")
-            row = service.resolve_review(merchant, reviewing.candidate_id, tx, message.text_content)
+            known = reviewing.candidate
+            if len(tx.items) != len(known.items) or any(
+                    getattr(old, field) is not None and getattr(old, field) != getattr(new, field)
+                    for old, new in zip(known.items, tx.items)
+                    for field in ("item_name", "quantity", "unit_price")):
+                raise ConfirmationError("Reply changed known items. Continue or cancel the pending candidate.")
+            if any(p not in tx.payments for p in known.payments):
+                raise ConfirmationError("Reply changed known payments. Review the pending candidate.")
+            row = service.ledger.replace_reviewed_candidate(
+                merchant.merchant_id, reviewing.candidate_id, reviewing.revision,
+                tx, message.text_content or "Media clarification", service.clock())
         else:
             row = service.stage(merchant, message.message_id, 0, tx)
         review = (row.candidate.validation_status == "NEEDS_REVIEW"
                   or row.candidate.needs_clarification or row.candidate.requires_review)
-        body = (row.candidate.clarification_question or "Review these details before confirming.")
+        latest_question, missing = question(row.candidate, language, script)
+        conversation.update(active_candidate_id=row.candidate_id, candidate_revision=str(row.revision),
+            expires_at=row.expires_at, missing_fields=missing, latest_question=latest_question if review else None)
+        body = latest_question if review else "Please confirm these transaction details."
         body += f"\nParty: {row.candidate.buyer_name or 'N/A'}\n"
+        for item in row.candidate.items:
+            body += f"{item.item_name}: {item.quantity} × {item.unit_price}\n"
+        for payment in row.candidate.payments:
+            body += f"{payment.method}: {payment.amount}\n"
+        body += f"Paid: {row.candidate.amount_paid}\nCredit: {row.candidate.credit_amount}\n"
+
         body += f"Total: {row.candidate.currency} {row.candidate.total_amount}\n"
         body += f"Candidate: {row.candidate_id}\nNothing posted yet."
         if review:

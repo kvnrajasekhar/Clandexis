@@ -51,6 +51,7 @@ class Settings(BaseModel):
     # ==========================================================================
     META_WHATSAPP_TOKEN: Optional[str] = Field(default_factory=lambda: _meta_env("META_WHATSAPP_TOKEN", "WHATSAPP_ACCESS_TOKEN"))
     META_PHONE_NUMBER_ID: Optional[str] = Field(default_factory=lambda: _meta_env("META_PHONE_NUMBER_ID", "WHATSAPP_PHONE_NUMBER_ID"))
+    WHATSAPP_DEMO_PHONE_MAP: str = Field(default_factory=lambda: os.getenv("WHATSAPP_DEMO_PHONE_MAP", "{}"))
     META_WABA_ID: Optional[str] = Field(default_factory=lambda: os.getenv("META_WABA_ID"))
     META_VERIFY_TOKEN: str = Field(
         default_factory=lambda: _meta_env("META_VERIFY_TOKEN", "WHATSAPP_VERIFY_TOKEN") or ""

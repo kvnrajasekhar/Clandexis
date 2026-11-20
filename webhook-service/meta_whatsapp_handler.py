@@ -31,13 +31,8 @@ from models.whatsapp_meta import (
 logger = logging.getLogger("meta-whatsapp-handler")
 
 def resolve_sender(sender_phone: str) -> Optional[str]:
-    from google.cloud.firestore_v1.base_query import FieldFilter
-    from app.services.ledger import get_db
-
-    matches = list(get_db().collection("merchants").where(
-        filter=FieldFilter("authorized_phones", "array_contains", sender_phone)
-    ).select([]).limit(2).stream())
-    return matches[0].id if len(matches) == 1 else None
+    from app.services.whatsapp_identity import resolve_phone
+    return resolve_phone(sender_phone)
 
 
 class MetaWhatsAppService:
@@ -83,7 +78,13 @@ class MetaWhatsAppService:
 
                 for msg in value.messages:
                     sender_wa_id = msg.from_user
-                    sender_phone = f"+{sender_wa_id}" if not sender_wa_id.startswith("+") else sender_wa_id
+                    from app.services.whatsapp_identity import normalize_phone
+                    try:
+                        sender_phone = normalize_phone(sender_wa_id)
+                    except ValueError:
+                        continue
+                    if sender_phone == normalize_phone(value.metadata.display_phone_number):
+                        continue
                     sender_name = contact_map.get(sender_wa_id)
                     if not re.fullmatch(r"\+[1-9][0-9]{1,14}", sender_phone):
                         continue
@@ -96,7 +97,12 @@ class MetaWhatsAppService:
                         tenant_id=tenant_id,
                         sender_phone=sender_phone,
                         sender_name=sender_name,
-                        raw_payload=raw_data,
+                        raw_payload={"object": raw_data.get("object"), "entry": [{
+                            "id": entry.id, "changes": [{"field": change.field, "value": {
+                                "metadata": value.metadata.model_dump(mode="json"),
+                                "messages": [msg.model_dump(mode="json", by_alias=True, exclude_none=True)]
+                            }}]
+                        }]},
                     )
                     if canonical_msg:
                         inbound_messages.append(canonical_msg)
