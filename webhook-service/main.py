@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import BackgroundTasks, FastAPI, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse
 
 from config import settings
 from models.canonical import InboundMessage, MessageType, OutboundMessage
@@ -62,6 +62,15 @@ from fastapi.staticfiles import StaticFiles
 dashboard_dist = Path(__file__).resolve().parent.parent / "dashboard" / "dist"
 if dashboard_dist.exists():
     app.mount("/dashboard", StaticFiles(directory=str(dashboard_dist), html=True), name="dashboard")
+
+
+@app.get("/", include_in_schema=False)
+async def root_redirect():
+    """Redirect root visitors directly to the WhatsApp ERP conversational bot."""
+    return RedirectResponse(
+        url=settings.whatsapp_chat_url,
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT
+    )
 
 
 

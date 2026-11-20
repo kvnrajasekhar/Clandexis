@@ -1,4 +1,5 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, status
+from fastapi.responses import RedirectResponse
 from contextlib import asynccontextmanager
 from app.core.config import settings
 from app.api.v1 import api_router
@@ -24,6 +25,14 @@ def create_app() -> FastAPI:
 
     from app.core.security import install_security
     install_security(app)
+
+    # Root redirect to WhatsApp
+    @app.get("/", include_in_schema=False)
+    async def root_redirect():
+        return RedirectResponse(
+            url=settings.whatsapp_chat_url,
+            status_code=status.HTTP_307_TEMPORARY_REDIRECT
+        )
 
     # Health check
     @app.get("/health", tags=["Health"])
