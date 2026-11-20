@@ -44,7 +44,6 @@ def resolve_phone(value: str) -> str | None:
     if settings.DATABASE_BACKEND == "postgres" and settings.DATABASE_URL:
         try:
             import psycopg
-            target_merchant = settings.DASHBOARD_DEMO_MERCHANT_ID or "00000000-0000-0000-0000-000000000001"
             with psycopg.connect(settings.DATABASE_URL, connect_timeout=5) as conn:
                 row = conn.execute(
                     "SELECT id FROM merchants WHERE phone_e164 = %s AND is_approved = true LIMIT 1",
@@ -52,10 +51,11 @@ def resolve_phone(value: str) -> str | None:
                 ).fetchone()
                 if row:
                     return str(row[0])
-                return target_merchant
+                return None
         except Exception as e:
             logger.warning("PostgreSQL merchant lookup for %s failed: %s", phone, e)
+            return None
 
-    # 3. Default fallback merchant ID for live operation without demo map
-    return settings.DASHBOARD_DEMO_MERCHANT_ID or "00000000-0000-0000-0000-000000000001"
+    # 3. Default fallback: not found / unregistered
+    return None
 
