@@ -1,5 +1,6 @@
 from datetime import timedelta
 import hashlib
+import logging
 import os
 import shutil
 import tempfile
@@ -16,6 +17,8 @@ from app.schemas.speech import TextToSpeechRequest, TextToSpeechResponse
 from app.services.speech import synthesize_speech
 
 from app.core.security import SessionIdentity, dashboard_identity
+
+logger = logging.getLogger("api-endpoints")
 
 router = APIRouter(dependencies=[Depends(dashboard_identity)])
 pipeline = None
@@ -80,7 +83,8 @@ async def extract_from_text(payload: TextExtractionRequest, identity: SessionIde
         )
         return dashboard_result(result, identity, payload.stage)
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Processing unavailable")
+        logger.error(f"Error in extract_from_text: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Processing unavailable: {str(e)}")
 
 @router.post("/extract/media", response_model=DashboardExtractionResult, summary="Extract & Validate Transaction from Audio, Image, or PDF")
 async def extract_from_media(
@@ -116,7 +120,8 @@ async def extract_from_media(
         )
         return dashboard_result(result, identity, stage)
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Processing unavailable")
+        logger.error(f"Error in extract_from_text: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Processing unavailable: {str(e)}")
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
@@ -147,7 +152,8 @@ async def generate_speech(payload: TextToSpeechRequest, identity: SessionIdentit
             audio_path=out_path,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Processing unavailable")
+        logger.error(f"Error in extract_from_text: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Processing unavailable: {str(e)}")
 
 @router.get("/speech/download", summary="Download generated audio")
 async def download_speech(audio_path: str, identity: SessionIdentity = Depends(dashboard_identity)):
