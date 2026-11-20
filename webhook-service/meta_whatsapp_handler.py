@@ -70,8 +70,11 @@ class MetaWhatsAppService:
         for entry in payload.entry:
             for change in entry.changes:
                 value = change.value
-                if not value.messages or not self.phone_number_id or value.metadata.phone_number_id != self.phone_number_id:
+                if not value.messages:
                     # Ignore status delivery receipts or empty message batches
+                    continue
+                if self.phone_number_id and value.metadata.phone_number_id and value.metadata.phone_number_id != self.phone_number_id:
+                    logger.warning("Dropped message for mismatched phone_number_id: %s != %s", value.metadata.phone_number_id, self.phone_number_id)
                     continue
 
                 contact_map = {c.wa_id: (c.profile.name if c.profile else None) for c in value.contacts or []}

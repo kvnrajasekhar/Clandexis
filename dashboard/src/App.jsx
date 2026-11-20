@@ -288,6 +288,12 @@ export default function App() {
               <Building2 className="w-3.5 h-3.5 text-slate-500" />
               <span className="text-slate-200 font-semibold">{session?.business_name || 'My Enterprise'}</span>
               {session?.name && <span>• {session.name}</span>}
+              {session?.phone_number && (
+                <span className="inline-flex items-center gap-1 text-emerald-400 font-mono">
+                  <Phone className="w-3 h-3 text-emerald-500" />
+                  {session.phone_number}
+                </span>
+              )}
               {session?.email && <span className="text-slate-500">({session.email})</span>}
             </p>
           </div>
@@ -319,6 +325,26 @@ export default function App() {
           >
             <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin text-emerald-400' : ''}`} />
           </button>
+
+          {/* User Profile Badge */}
+          <div className="flex items-center space-x-2 pl-2 border-l border-slate-800">
+            {session?.picture ? (
+              <img
+                src={session.picture}
+                alt={session.name || 'User Profile'}
+                className="w-7 h-7 rounded-full border border-emerald-500/40 object-cover shadow-sm"
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <div className="w-7 h-7 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center font-bold text-xs">
+                {(session?.name || session?.email || 'U')[0].toUpperCase()}
+              </div>
+            )}
+            <div className="hidden md:flex flex-col text-left">
+              <span className="text-xs font-semibold text-white leading-tight">{session?.name || 'User'}</span>
+              <span className="text-[11px] text-emerald-400 font-mono leading-tight">{session?.phone_number || ''}</span>
+            </div>
+          </div>
 
           <button
             onClick={logout}
