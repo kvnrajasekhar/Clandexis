@@ -19,6 +19,7 @@ CREATE TABLE merchants (
     is_approved boolean NOT NULL DEFAULT false,
     business_name text NOT NULL CHECK (btrim(business_name) <> ''),
     owner_name text,
+    owner_email text,
     preferred_language text NOT NULL DEFAULT 'en',
     script_preference text NOT NULL DEFAULT 'Latin',
     currency text NOT NULL DEFAULT 'INR' CHECK (currency ~ '^[A-Z]{3}$'),

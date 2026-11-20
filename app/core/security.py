@@ -13,10 +13,24 @@ from pydantic import BaseModel
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 import json
+import re
 import psycopg
 from config import settings
 
 router = APIRouter(prefix="/auth", tags=["Session"])
+
+
+def normalize_phone(phone: str) -> str:
+    cleaned = re.sub(r"[\s\-\(\)]", "", (phone or "").strip())
+    if re.match(r"^[6-9]\d{9}$", cleaned):
+        cleaned = f"+91{cleaned}"
+    elif re.match(r"^0[6-9]\d{9}$", cleaned):
+        cleaned = f"+91{cleaned[1:]}"
+    elif not cleaned.startswith("+") and cleaned.startswith("91") and len(cleaned) == 12:
+        cleaned = f"+{cleaned}"
+    if not re.match(r"^\+[1-9]\d{7,14}$", cleaned):
+        raise ValueError("Please enter a valid mobile number with country code (e.g., +91 98765 43210 or 10-digit mobile number)")
+    return cleaned
 
 
 @dataclass(frozen=True)
@@ -68,6 +82,12 @@ class GoogleLoginRequest(BaseModel):
     credential: str
 
 
+class OnboardRequest(BaseModel):
+    name: str
+    phone_number: str
+    business_name: str
+
+
 @router.get("/config")
 def auth_config():
     return {
@@ -108,6 +128,7 @@ def google_login(payload: GoogleLoginRequest, request: Request):
     merchant_id = None
     business_name = None
     phone_number = None
+    needs_onboarding = True
 
     DEMO_MERCHANT_ID = "00000000-0000-0000-0000-000000000001"
     if settings.DATABASE_BACKEND == "postgres" and settings.DATABASE_URL:
@@ -144,47 +165,140 @@ def google_login(payload: GoogleLoginRequest, request: Request):
                         "UPDATE merchants SET owner_name = %s, tax_address = %s WHERE id = %s",
                         (name, tax_json, merchant_id)
                     )
+                    conn.commit()
+                    # Check if the user has completed explicit onboarding
+                    is_onboarded = bool(tax_data.get("onboarded", False))
+                    has_valid_phone = bool(phone_number and not phone_number.startswith("+910000"))
+                    has_biz_name = bool(business_name and "Business" not in business_name)
+                    if is_onboarded and has_valid_phone:
+                        needs_onboarding = False
+                    else:
+                        needs_onboarding = True
                 else:
-                    new_id = str(uuid4())
-                    business_name = f"{name}'s Business"
-                    phone_number = f"+91{abs(hash(email)) % 9000000000 + 1000000000}"
-                    conn.execute(
-                        """INSERT INTO merchants (id, phone_e164, is_approved, business_name, owner_name, owner_email, tax_address)
-                        VALUES (%s, %s, true, %s, %s, %s, %s)""",
-                        (new_id, phone_number, business_name, name, email, tax_json)
-                    )
-                    merchant_id = new_id
-                conn.commit()
+                    # New user from Google Sign In: prompt for mobile number and business name
+                    needs_onboarding = True
         except Exception as e:
             logging.warning("Database lookup during auth for %s: %s (using graceful fallback)", email, e)
-            merchant_id = str(uuid4())
-            business_name = f"{name}'s Business"
-            phone_number = f"+91{abs(hash(email)) % 9000000000 + 1000000000}"
-
-    if not merchant_id:
-        merchant_id = str(uuid4())
-        business_name = f"{name}'s Business"
-        phone_number = f"+91{abs(hash(email)) % 9000000000 + 1000000000}"
+            needs_onboarding = True
 
     request.session.clear()
     csrf_token = secrets.token_urlsafe(32)
     request.session.update(
-        merchant_id=str(merchant_id),
+        merchant_id=str(merchant_id or ""),
         user_email=email,
         user_name=name,
-        business_name=business_name or "My Business",
-        picture=picture,
+        business_name=business_name or "",
+        picture=picture or "",
         phone_number=phone_number or "",
+        needs_onboarding=needs_onboarding,
         csrf_token=csrf_token
     )
     return {
-        "merchant_id": request.session["merchant_id"],
+        "merchant_id": str(merchant_id or ""),
         "csrf_token": csrf_token,
         "email": email,
         "name": name,
-        "business_name": business_name,
+        "business_name": business_name or "",
+        "picture": picture or "",
+        "phone_number": phone_number or "",
+        "needs_onboarding": needs_onboarding
+    }
+
+
+@router.post("/onboard")
+def onboard(payload: OnboardRequest, request: Request):
+    _origin(request)
+    user_email = request.session.get("user_email")
+    if not user_email:
+        raise HTTPException(401, "Authentication required. Please sign in with Google first.")
+
+    # Verify CSRF token
+    csrf_hdr = request.headers.get("x-csrf-token")
+    if not _same(csrf_hdr, request.session.get("csrf_token")):
+        raise HTTPException(403, "Invalid CSRF token")
+
+    clean_name = (payload.name or "").strip() or request.session.get("user_name", "Merchant")
+    clean_biz = (payload.business_name or "").strip()
+    if not clean_biz:
+        raise HTTPException(400, "Business name is required.")
+
+    try:
+        clean_phone = normalize_phone(payload.phone_number)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    merchant_id = request.session.get("merchant_id")
+    picture = request.session.get("picture", "")
+
+    if settings.DATABASE_BACKEND == "postgres" and settings.DATABASE_URL:
+        from app.services.postgres_db import PostgresDatabase
+        db = PostgresDatabase()
+        try:
+            with psycopg.connect(db.dsn, connect_timeout=5) as conn:
+                # 1. Check if phone is already registered with another email
+                conflict = conn.execute(
+                    "SELECT id, owner_email FROM merchants WHERE phone_e164 = %s AND (owner_email IS NULL OR owner_email != %s) LIMIT 1",
+                    (clean_phone, user_email)
+                ).fetchone()
+                if conflict:
+                    raise HTTPException(400, "This mobile number is already registered to another merchant account.")
+
+                # 2. Check if a merchant record exists for this email
+                existing = conn.execute(
+                    "SELECT id, tax_address FROM merchants WHERE owner_email = %s LIMIT 1",
+                    (user_email,)
+                ).fetchone()
+
+                tax_data = existing[1] if existing and isinstance(existing[1], dict) else {}
+                tax_data["picture"] = picture or tax_data.get("picture", "")
+                tax_data["onboarded"] = True
+                tax_json = json.dumps(tax_data)
+
+                if existing:
+                    merchant_id = str(existing[0])
+                    conn.execute(
+                        """UPDATE merchants
+                           SET business_name = %s, owner_name = %s, phone_e164 = %s, tax_address = %s
+                           WHERE id = %s""",
+                        (clean_biz, clean_name, clean_phone, tax_json, merchant_id)
+                    )
+                else:
+                    new_id = merchant_id if (merchant_id and len(merchant_id) == 36) else str(uuid4())
+                    conn.execute(
+                        """INSERT INTO merchants (id, phone_e164, is_approved, business_name, owner_name, owner_email, tax_address)
+                           VALUES (%s, %s, true, %s, %s, %s, %s)""",
+                        (new_id, clean_phone, clean_biz, clean_name, user_email, tax_json)
+                    )
+                    merchant_id = new_id
+                conn.commit()
+        except HTTPException:
+            raise
+        except Exception as e:
+            logging.error("Failed to persist merchant onboarding in PostgreSQL: %s", e)
+            if not merchant_id:
+                merchant_id = str(uuid4())
+    else:
+        if not merchant_id or len(merchant_id) != 36:
+            merchant_id = str(uuid4())
+
+    request.session.update(
+        merchant_id=str(merchant_id),
+        user_name=clean_name,
+        business_name=clean_biz,
+        phone_number=clean_phone,
+        needs_onboarding=False
+    )
+
+    return {
+        "status": "success",
+        "merchant_id": str(merchant_id),
+        "name": clean_name,
+        "email": user_email,
+        "business_name": clean_biz,
+        "phone_number": clean_phone,
         "picture": picture,
-        "phone_number": phone_number or ""
+        "needs_onboarding": False,
+        "csrf_token": request.session.get("csrf_token")
     }
 
 
@@ -203,6 +317,8 @@ def login(payload: LoginRequest, request: Request):
         user_email="demo@clandexis.com",
         user_name=payload.username,
         business_name="Sri Balaji Textiles",
+        phone_number="+919876543210",
+        needs_onboarding=False,
         csrf_token=csrf_token
     )
     return {
@@ -210,20 +326,27 @@ def login(payload: LoginRequest, request: Request):
         "csrf_token": csrf_token,
         "email": "demo@clandexis.com",
         "name": payload.username,
-        "business_name": "Sri Balaji Textiles"
+        "business_name": "Sri Balaji Textiles",
+        "phone_number": "+919876543210",
+        "needs_onboarding": False
     }
 
 
 @router.get("/session")
-def session(request: Request, identity: SessionIdentity = Depends(dashboard_identity)):
+def session(request: Request):
+    user_email = request.session.get("user_email")
+    merchant_id = request.session.get("merchant_id")
+    if not user_email and not merchant_id:
+        raise HTTPException(401, "Authentication required")
     return {
-        "merchant_id": identity.merchant_id,
+        "merchant_id": merchant_id or "",
         "csrf_token": request.session.get("csrf_token"),
-        "email": request.session.get("user_email"),
-        "name": request.session.get("user_name"),
-        "business_name": request.session.get("business_name"),
-        "picture": request.session.get("picture"),
-        "phone_number": request.session.get("phone_number"),
+        "email": user_email or "",
+        "name": request.session.get("user_name") or "",
+        "business_name": request.session.get("business_name") or "",
+        "picture": request.session.get("picture") or "",
+        "phone_number": request.session.get("phone_number") or "",
+        "needs_onboarding": bool(request.session.get("needs_onboarding", False))
     }
 
 
