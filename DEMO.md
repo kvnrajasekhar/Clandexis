@@ -1,87 +1,106 @@
-# Local PostgreSQL demo
+# Clandexis buildathon demo
 
-Open **http://127.0.0.1:8180/dashboard/**. Sign in as **demo**.
+Clandexis is a multilingual, multimodal ERP for small merchants. It converts text, Telugu/Hindi voice, receipt images, and PDFs into Schema 1.1 transaction candidates. Nothing reaches the ledger until the authenticated merchant reviews and confirms the exact persisted candidate.
 
-On the prepared Mac, copy the generated password to the clipboard without printing it, then paste it into the login form:
+## Verified release
 
-```bash
-.venv/bin/python -c 'import json,pathlib,subprocess; p=pathlib.Path.home()/".local/state/clandexis-postgres-demo/session.json"; subprocess.run(["pbcopy"],input=json.loads(p.read_text())["password"].encode(),check=True)'
+- Source branch: `test`
+- Application commit: `189d538cb6827fe39cdcf9d388af7373f799ee0e`
+- Persistence: PostgreSQL 17 with row-level security
+- PostgreSQL signed-webhook E2E: 10/10 passed
+- General tests: 92 passed; 4 legacy Firestore-emulator modules skipped
+- Live Gemini audit: 10/10 text/audio/image/PDF inputs completed
+- Frontend production build: passed
+- Live Cloud Run, Cloud SQL, GCS, and corrected real-phone delivery: not yet verified
+
+## Architecture
+
+```text
+Dashboard or signed Meta webhook
+  -> approved phone-to-merchant identity
+  -> Gemini Schema 1.1 extraction
+  -> deterministic validation and clarification
+  -> persisted PostgreSQL candidate
+  -> candidate-specific Confirm/Cancel
+  -> atomic PostgreSQL ledger, inventory, receivable and journal commit
+  -> invoice generated from the committed sale
 ```
 
-## Start or restart
+Greetings, stock, customer balances, and daily summaries use the same merchant-scoped PostgreSQL state as the dashboard. Unknown senders and cross-merchant requests are rejected. Query and report requests never create financial transactions.
 
-Run from the repository root:
+## Start the prepared local demo
+
+From the repository root:
 
 ```bash
 DATABASE_URL='postgresql://clandexis_app_test@127.0.0.1:55439/clandexis_demo' \
   PYTHONPATH=. .venv/bin/python scripts/run_postgres_demo.py
 ```
 
-If an instance already owns port 8180, stop that instance with Ctrl-C before starting another. The launcher retains its merchant, credentials, and financial records. PostgreSQL data is stored under `~/.local/state/clandexis-postgres-demo/pgdata`. The protected session file is in the same directory.
+Open <http://127.0.0.1:8180/dashboard/> and sign in as `demo`. Copy the protected local password to the clipboard without printing it:
 
-The approved phone comes from `POSTGRES_DEMO_PHONE` or the sole entry in the ignored `WHATSAPP_DEMO_PHONE_MAP`. The launcher applies the PostgreSQL and session settings before loading the application. Meta transport is disabled for this local demo.
+```bash
+.venv/bin/python -c 'import json,pathlib,subprocess; p=pathlib.Path.home()/".local/state/clandexis-postgres-demo/session.json"; subprocess.run(["pbcopy"],input=json.loads(p.read_text())["password"].encode(),check=True)'
+```
 
-[PostgreSQL setup](docs/POSTGRES_MIGRATION.md) covers a fresh machine and separate test databases.
+The launcher disables Meta transport. Local PostgreSQL data and credentials remain under `~/.local/state/clandexis-postgres-demo/`.
 
-## Starting data and existing results
+## Reproducible sale and repayment
 
-A newly seeded account has 200 Cotton Shirt (L), 150 Linen Kurta (M), and zero customer balances. Seeded parties include Suresh Traders, Ramesh Textiles, and Raju.
+The current demo already contains the verified result: ₹10,000 sales, ₹5,000 cumulative UPI, ₹5,000 outstanding for Suresh Traders, and 150 Cotton Shirts. Repeating a new sale will add another transaction.
 
-The current prepared demo has already completed the verified sale and repayment below. It shows ₹10,000 sales, ₹5,000 cumulative UPI, ₹5,000 outstanding for Suresh Traders, and 150 shirts. Repeating a new sale will add another sale. Reusing an existing candidate's confirmation has one posting effect.
-
-For repeatable clean scenarios, use the isolated accounts created by [the test suite](docs/TESTING.md). Keep the current demo records when inspecting the completed flow.
-
-## Sale with clarification
-
-1. Open **Live Extractor** and enter the incomplete sale. Click **Run Extraction & Validation**.
-2. Check the returned candidate ID and `NEEDS_REVIEW` status. Open **Overview** to find the candidate's **Reply to clarify** field.
-3. Answer the price question, then the payment question. Click **Send reply** after each answer. Both answers update the same candidate.
-4. Once it becomes `ACCEPTED / PENDING_CONFIRMATION`, check buyer, items, quantities, total, paid, and credit. Click **Authorize & Commit to Ledger** in Overview, or **Commit** for the same ID in **Candidates**.
-5. Check **Transactions**, **Inventory**, and **Overview**. Open **Download invoice** on the committed sale.
-
-**Incomplete Romanized Telugu input**
+For a freshly seeded test merchant, start with 200 Cotton Shirts and submit:
 
 > Nenu Suresh Traders ki eeroju 50 Cotton Shirt (L) ammanu.
 
-**Price answer**
+Answer the same candidate's questions:
 
 > Okkokka Cotton Shirt (L) dhara 200 rupees.
 
-**Payment answer**
-
 > 2000 rupees UPI lo vachayi, migilina 8000 rupees udhaar.
 
-**Complete English alternative**
+Review the full ₹10,000 / ₹2,000 / ₹8,000 summary and click **Confirm**. Expected state:
 
-> Sold 50 Cotton Shirt (L) to Suresh Traders at INR 200 each, total INR 10000. Received INR 2000 by UPI. Remaining INR 8000 on credit.
+| Measure | After sale |
+| --- | ---: |
+| Sales | ₹10,000 |
+| UPI | ₹2,000 |
+| Suresh outstanding | ₹8,000 |
+| Cotton Shirts | 150 |
 
-**Hindi input for a missing-details check**
-
-> आज मैंने राजू को 10 कॉटन शर्ट बेचीं।
-
-A price/payment follow-up is expected. Review the actual extraction before proceeding.
-
-## Repayment
-
-In **Live Extractor**, submit:
+Then submit and confirm:
 
 > Suresh Traders paid INR 3000 through UPI against his previous outstanding balance. No new sale or stock movement.
 
-Review and confirm its persisted candidate. From a freshly seeded account that has completed the sale above, the results are:
+Expected final state: sales ₹10,000, cumulative UPI ₹5,000, outstanding ₹5,000, stock 150. Reconfirming the original candidate must not create another transaction or stock deduction.
 
-| Measure | After sale | After repayment |
-| --- | --- | --- |
-| Sales | ₹10,000 | ₹10,000 |
-| Cumulative UPI | ₹2,000 | ₹5,000 |
-| Customer outstanding | ₹8,000 | ₹5,000 |
-| Shirts | 150 | 150 |
+## Multilingual and media checks
 
-The sale invoice retains total ₹10,000, paid ₹2,000, and due ₹8,000 as recorded at posting. The customer's current outstanding appears in Overview and the party balance.
+- Hindi missing-details input: `आज मैंने राजू को 10 कॉटन शर्ट बेचीं।`
+- Romanized Hindi: `Maine aaj Suresh ko 10 cotton shirts bechi.`
+- Code-switched repayment: `Suresh ne previous udhaar ke against 3000 UPI pay chesadu.`
+- Telugu audio fixture: `../voice-telugu.mp3`
+- PDF fixture: `../Invoice 1.pdf`
 
-## Audio and invoice downloads
+Use **Live Extractor** for files. Review transcript, buyer, item, quantity, price, payment, validation, and candidate ID before confirmation. A non-transaction image must return `unknown` and create no ledger write. A mismatched invoice must remain in review.
 
-Select **Upload audio** in Live Extractor. A selected file takes precedence over typed text. Use a real recording with the transaction details and inspect the transcript/extraction before confirmation. The sample `../voice-telugu.mp3` was uploaded to live Gemini with staging disabled during verification; its content is independent of the scripted sale above.
+## Invoice and backup
 
-Download the PDF from **Transactions** after committing a sale. Invoice storage failures leave the sale committed and report `PENDING_RETRY`.
+After confirming a sale, open **Transactions** and download its invoice. The PDF is generated from immutable committed transaction data. A generation failure leaves the sale committed and reports a retryable document status.
 
-The personal Firestore emulator from the earlier demo is currently unavailable. Its preserved archives and the current SQL demo are described in [the migration guide](docs/POSTGRES_MIGRATION.md).
+The prepared browser-demo database backup is:
+
+```text
+~/.local/state/clandexis-postgres-demo/release-189d538.dump
+```
+
+It is a validated PostgreSQL custom-format archive with mode `0600`. Do not restore it over an existing database; restore into a separate empty demo database.
+
+## Known limitations and release safety
+
+- Catalog and available-stock eligibility are finally enforced during confirmation. A candidate can display Confirm and then be held safely if its item is unknown or stock is insufficient.
+- Gemini transcription can be uncertain; explicit review and confirmation remain mandatory.
+- The old Cloud Run callback is not a trusted release. Meta must stay unsubscribed until a new revision is deployed from the recorded SHA, connected to an isolated Cloud SQL database, and passes staging verification.
+- Cloud SQL credentials, Secret Manager bindings, GCS invoice delivery, and real Meta delivery require direct cloud evidence before being claimed.
+
+See [testing evidence](docs/TESTING.md), [PostgreSQL setup](docs/POSTGRES_MIGRATION.md), and [deployment requirements](docs/DASHBOARD_DEPLOYMENT.md).
