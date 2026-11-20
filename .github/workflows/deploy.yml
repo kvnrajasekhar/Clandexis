@@ -1,0 +1,48 @@
+name: Deploy to Google Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PROJECT_ID: clandexis
+  REGION: asia-south1
+  SERVICE_NAME: invisible-erp-webhook
+  IMAGE_NAME: gcr.io/clandexis/invisible-erp-webhook
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: clandexis
+
+      - name: Authorize Docker CLI
+        run: gcloud auth configure-docker --quiet
+
+      - name: Build and Push Container Image
+        run: |
+          docker build -t "${IMAGE_NAME}:${{ github.sha }}" -t "${IMAGE_NAME}:latest" .
+          docker push "${IMAGE_NAME}:${{ github.sha }}"
+          docker push "${IMAGE_NAME}:latest"
+
+      - name: Deploy Revision to Cloud Run
+        run: |
+          gcloud run deploy "${SERVICE_NAME}" \
+            --image "${IMAGE_NAME}:${{ github.sha }}" \
+            --region "${REGION}" \
+            --project "${PROJECT_ID}" \
+            --platform managed
