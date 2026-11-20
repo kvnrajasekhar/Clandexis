@@ -1,4 +1,6 @@
-# Ledger & Inventory Interface
+# Firestore ledger reference
+
+This document describes the detailed Firestore implementation in `app/services/ledger.py`, including legacy seed/opening-balance APIs. The PostgreSQL application selects its adapter through `app/services/persistence.py` and reuses this module's canonical planning functions. Use [PostgreSQL setup](POSTGRES_MIGRATION.md) for SQL configuration and [confirmation contracts](CONFIRMATION_PDF_INTERFACE.md) for the current application boundary. WhatsApp uses the explicit one-phone-to-one-merchant map and candidate-specific buttons described in [integration setup](WHATSAPP_INTEGRATION.md).
 
 Module: `app/services/ledger.py` (Firestore, merchant-scoped). Implements the frozen integration contract.
 Every function takes an optional `db=` (a `google.cloud.firestore.Client`); default is `get_db()`, which honors
@@ -147,7 +149,9 @@ with existing models.
 ## Running the tests
 
 ```
-tests/run_ledger_tests.sh        # needs Java 21+ and firebase-tools; starts the real Firestore emulator
+DATABASE_BACKEND=firestore tests/run_ledger_tests.sh  # needs Java 21+ and firebase-tools; starts the real Firestore emulator
 ```
 Without `FIRESTORE_EMULATOR_HOST` the emulator modules are skipped (not passed). Commits are retried on
 Firestore contention (`_run_txn`), safe because every operation is idempotent and re-reads inside the transaction.
+
+See [tests and verification](TESTING.md) for the current PostgreSQL, transfer, and regression commands and recorded results.

@@ -1,60 +1,89 @@
-# PostgreSQL application migration
+# PostgreSQL setup and migration
 
-The application selects exactly one backend through DATABASE_BACKEND. Use postgres with DATABASE_URL to activate the SQL adapter. The default remains firestore for compatibility with existing environments. A failed SQL connection never falls back to Firestore. Durable webhook event records handle deduplication, so a failed provider call can retry the same event without being blocked by the process-local input cache. Restart the process after changing backend settings.
+The application migration is implemented and verified locally. Select it with `DATABASE_BACKEND=postgres` and a configured `DATABASE_URL`. The backend is chosen at process startup, and connection failures remain on that backend. The default setting is `firestore` for existing environments.
 
-The SQL adapter reuses the existing ledger's validator, decimal calculations, catalog matching and journal planning. The existing supported intents remain sale, repayment and stock addition. Other extracted intents remain held for review. Every SQL connection sets its merchant UUID for the schema's row-level security policies. Remote TCP connections require sslmode=verify-full. Cloud SQL Auth Proxy Unix sockets are also supported.
+The SQL adapter reuses the canonical validator, exact-money calculations, catalog matching, and journal planning. Supported posting intents remain sale, repayment, and stock addition.
 
-## Database preparation
+## Prepare an empty database
 
-Install models/postgres_schema.sql once in an empty PostgreSQL 17+ database. Use a separate runtime login without superuser or BYPASSRLS privileges. Grant that login schema usage and SELECT/INSERT/UPDATE/DELETE on the application tables. Keep schema ownership and DDL privileges with the migration administrator. The application does not provision Cloud SQL instances, change IAM, or install the schema at startup.
-
-The schema shared with the team remains unchanged by the application migration. Candidate hashes use the database's JSONB representation and are returned as opaque revisions to the dashboard and confirmation bridge.
-
-## Local demo on this Mac
-
-An isolated local PostgreSQL cluster listens on 127.0.0.1:55439. Its data directory is ~/.local/state/clandexis-postgres-demo/pgdata and the launcher can restart that existing cluster. A protected demo-before-migration-commit.dump backup is stored alongside it. The application database is clandexis_demo and the limited local test login is clandexis_app_test. The local cluster uses loopback-only development authentication. Production must use its own runtime credentials and verified TLS or Cloud SQL Auth Proxy.
+Use PostgreSQL 17+ and [models/postgres_schema.sql](../models/postgres_schema.sql). An administrator should create the database and a dedicated application login, then apply the file once. Configure the administrator's connection through normal protected PostgreSQL connection settings.
 
 ```bash
-cd /Users/avinash/Desktop/clandexis/team_clandexis
-DATABASE_URL='postgresql://clandexis_app_test@127.0.0.1:55439/clandexis_demo' PYTHONPATH=. .venv/bin/python scripts/run_postgres_demo.py
+psql -v ON_ERROR_STOP=1 -f models/postgres_schema.sql
 ```
 
-Open http://127.0.0.1:8180/dashboard/ and sign in as demo. Copy the password to the clipboard without printing it:
+The script is fresh-install DDL. Existing databases need a separately reviewed migration before this file is applied.
+
+For an application role named `clandexis_app`, the administrator grants:
+
+```sql
+GRANT USAGE ON SCHEMA public TO clandexis_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO clandexis_app;
+```
+
+Keep schema ownership, DDL, superuser, `BYPASSRLS`, and `TRUNCATE` privileges with administration. Runtime connections set `app.merchant_id` to the merchant UUID resolved from the trusted session or approved phone map. All SQL table relationships and operations remain merchant-scoped.
+
+## Configure the application
+
+Add settings to the ignored `.env` or inject them into the process:
+
+| Setting | Purpose |
+| --- | --- |
+| `DATABASE_BACKEND=postgres` | Activate SQL persistence |
+| `DATABASE_URL` | Runtime login and database connection |
+| `WHATSAPP_DEMO_PHONE_MAP` | Explicit E.164 phone-to-merchant UUID mapping |
+| `DASHBOARD_DEMO_MERCHANT_ID` | Existing UUID assigned to the restricted dashboard login |
+| Session, CSRF/origin, Gemini, and invoice settings | See [security](P0_APPLICATION_INTEGRATION.md) and [deployment](DASHBOARD_DEPLOYMENT.md) |
+
+Direct remote TCP connections require `sslmode=verify-full` and an approved CA configuration. The adapter also accepts localhost and Unix-socket connections, including a configured Cloud SQL Auth Proxy connection. It opens tenant-scoped connections without automatic backend failover.
+
+The application installs neither the schema nor cloud resources at startup. The original SQL file shared with the deployment team remains the required schema for this adapter.
+
+## Prepared local environment
+
+| Resource | Location |
+| --- | --- |
+| PostgreSQL listener | `127.0.0.1:55439` |
+| Application database | `clandexis_demo` |
+| Isolated test database | `clandexis_app_test` |
+| Limited local runtime login | `clandexis_app_test` |
+| Durable cluster files | `~/.local/state/clandexis-postgres-demo/pgdata` |
+| Generated demo credentials | `~/.local/state/clandexis-postgres-demo/session.json` |
+| Local invoice files | `~/.local/state/clandexis-postgres-demo/invoices` |
+| Demo backup | `~/.local/state/clandexis-postgres-demo/demo-before-migration-commit.dump` |
+
+This development cluster uses loopback-only authentication. Production requires its own credentials and connection configuration.
 
 ```bash
-.venv/bin/python -c 'import json,pathlib,subprocess; p=pathlib.Path.home()/".local/state/clandexis-postgres-demo/session.json"; subprocess.run(["pbcopy"],input=json.loads(p.read_text())["password"].encode(),check=True)'
+DATABASE_URL='postgresql://clandexis_app_test@127.0.0.1:55439/clandexis_demo' \
+  PYTHONPATH=. .venv/bin/python scripts/run_postgres_demo.py
 ```
 
-The approved phone comes from POSTGRES_DEMO_PHONE or the sole explicit entry in the ignored WHATSAPP_DEMO_PHONE_MAP. The launcher keeps the same merchant and credentials between restarts, and seeds only a new merchant. It disables Meta transport settings and creates no public tunnel. The initial state is 200 cotton shirts, 150 linen kurtas and zero customer balances. Bootstrap stock is an explicit internal opening entry. Opening entries are omitted from ordinary transaction listings and business transaction counts.
+The launcher can restart the prepared cluster. `PG_CTL` can override the PostgreSQL control executable. It creates a new seed only when its merchant is absent and retains the saved account between restarts. `POSTGRES_DEMO_STATE` selects another explicit local state directory; `POSTGRES_DEMO_PHONE` selects the approved sender when the environment map contains several phones.
 
-The local smoke test used live Gemini through the HTTP API. Romanized Telugu described selling 50 shirts to Suresh Traders, without price/payment details. The same candidate was clarified first with INR 200 each, then INR 2000 UPI and INR 8000 credit. Sales remained zero before explicit confirmation. After confirmation, sales were INR 10000, UPI INR 2000, outstanding INR 8000 and shirts 150. A duplicate confirmation had no second effect. A live Gemini repayment of INR 3000 left sales and shirts unchanged, raised cumulative UPI to INR 5000 and reduced outstanding to INR 5000. The downloaded PDF retained original paid/due amounts. A PDF ledger request staged nothing. The actual voice-telugu.mp3 upload reached Gemini with staging disabled and did not change the ledger. These checks were performed locally, with no live Meta delivery.
+Follow [DEMO.md](../DEMO.md) for login and the transaction walkthrough. [TESTING.md](TESTING.md) contains the automated commands and live-model evidence.
 
-## Verification commands
+## Transfer existing emulator data
 
-Use the isolated clandexis_app_test database for repeatable tests. Tests add new isolated merchants and preserve existing records.
+`scripts/migrate_local_demo_postgres.py` reads an explicitly selected Firestore emulator merchant and copies it into a separate deterministic PostgreSQL UUID. Set `DATABASE_URL` to the local target, `FIRESTORE_EMULATOR_HOST` to the source emulator, and `GCP_PROJECT_ID` to the source project. Then run:
 
 ```bash
-DATABASE_URL='postgresql://clandexis_app_test@127.0.0.1:55439/clandexis_app_test' tests/run_postgres_tests.sh
-PATH="$HOME/.cache/clandexis-tools/jdk-21.0.13.1+2-jre/Contents/Home/bin:$PATH" FIREBASE_BIN="$HOME/.cache/clandexis-tools/fb/node_modules/.bin/firebase" bash tests/run_ledger_tests.sh
-DATABASE_URL='postgresql://clandexis_app_test@127.0.0.1:55439/clandexis_app_test' PATH="$HOME/.cache/clandexis-tools/jdk-21.0.13.1+2-jre/Contents/Home/bin:$PATH" "$HOME/.cache/clandexis-tools/fb/node_modules/.bin/firebase" emulators:exec --only firestore --project demo-clandexis 'PYTHONPATH=. .venv/bin/python -m pytest tests/postgres_migration_checks.py -v'
+PYTHONPATH=. .venv/bin/python scripts/migrate_local_demo_postgres.py \
+  --source-merchant SOURCE_MERCHANT_ID \
+  --phone APPROVED_E164_PHONE \
+  --archive /private/path/source-export.json
 ```
 
-The PostgreSQL application tests use real SQL records, a signed Meta-shaped webhook, authenticated dashboard APIs, real ReportLab rendering and local artifact storage. Gemini and Meta network delivery are stubbed in those repeatable tests. The separate live Gemini smoke test above uses the actual model.
+The importer preserves the source, writes a private archive, retains legacy IDs and source metadata, reconstructs opening balances, and replays committed records through canonical plans. It verifies stock and receivables before reporting `VERIFIED`. Repeating the same export is idempotent. A changed source fingerprint or a conflicting archive stops the import.
 
-## Existing data transfer
+Pending candidates and active conversation context are copied. Imported historical messages return a cached historical acknowledgment on replay. Closed historical reviews and original artifact metadata remain in the archive. Unsupported legacy schema versions require an explicit reviewed mapping.
 
-scripts/migrate_local_demo_postgres.py reads an explicitly selected Firestore emulator merchant and copies it into a separate deterministic PostgreSQL merchant UUID. The source is read-only. The importer preserves an on-disk source archive, legacy IDs and original source/candidate metadata, reconstructs opening stock/receivables, and replays committed records through canonical ledger plans. Rerunning the same export is idempotent. A changed source fingerprint stops a resumed import. It verifies stock and receivable totals before reporting VERIFIED.
+After `VERIFIED`, configure the returned UUID in both `WHATSAPP_DEMO_PHONE_MAP` and `DASHBOARD_DEMO_MERCHANT_ID`, then restart the application. Keep the source and archive available for reconciliation.
 
-Pending candidates and active conversation context are copied. Historical conversation events become cached historical acknowledgments so retries cannot restage past transactions. Closed historical review records and source artifacts remain in the source archive. Unsupported legacy schema versions require explicit mapping and stop the import. Never add a partially imported destination UUID to the runtime phone map or dashboard configuration. Use the UUID only after VERIFIED, then update WHATSAPP_DEMO_PHONE_MAP and DASHBOARD_DEMO_MERCHANT_ID together.
+The transfer test used a real Firestore emulator source and a real SQL destination. The earlier personal emulator is currently unavailable, and its preserved incident archive remains intact. The running PostgreSQL dashboard is a separately seeded demo; transfer of that personal source remains pending.
 
-The transfer regression test copies an actual canonical Firestore emulator sale and repayment to PostgreSQL, verifies all balances, resumes without duplicates, retains a pending conversation, and checks that source records were not changed. The previously running personal Firestore emulator is currently unavailable. Its incident archive remains preserved. The running SQL dashboard is a separately seeded demo, not an asserted complete transfer of that unavailable emulator.
+## Cloud status
 
-## Cloud cutover remains pending
+The supplied instance name is `clandexis:asia-south1:clandexis`. Cloud testing awaits the database name, application login, approved test database, and configured connection authentication. The Google-managed Cloud SQL service-agent email identifies infrastructure and does not supply a database login.
 
-The supplied Cloud SQL instance name is clandexis:asia-south1:clandexis. Database login details and an approved isolated database are still required before cloud tests. The Google-managed Cloud SQL service-agent email is not an application database login. Per the latest instruction, this run tests locally first and makes no Cloud SQL or IAM changes.
-
-The old Cloud Run deployment remains untrusted and Meta remains disconnected. Cloud cutover needs the corrected revision, SQL runtime configuration, two-merchant isolation tests and real-phone verification before restoring the subscription.
-
-Final local test results were 8 PostgreSQL application checks, 1 real Firestore-to-PostgreSQL transfer/resume check and 134 existing Firestore checks, all passing. The PostgreSQL schema separately passed its 26 SQL assertions. Cloud testing remains deferred at the user’s request.
-
-A final normal-entry restart exposed an early application import in the demo launcher. The launcher now applies all backend/session settings before importing application modules. A separate-process regression test verifies that initialization order, and the running server was rechecked with HTTP 200 login, PostgreSQL health metadata and the preserved financial totals.
+The current verification is local. [Deployment requirements](DASHBOARD_DEPLOYMENT.md) cover the remaining Cloud SQL, Cloud Run, GCS, and Meta checks.

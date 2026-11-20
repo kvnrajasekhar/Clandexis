@@ -1,109 +1,87 @@
-# 🚀 Clandexis Deployment & Verification Guide
+# Deployment requirements
 
-> **Target Platform:** Google Cloud Run (Container Service) + Google Cloud Firestore (Native Mode, `asia-south1`)  
-> **GCP Project ID:** `clandexis` | **Region:** `asia-south1`
+The corrected application is verified locally with PostgreSQL. Cloud SQL connectivity, the corrected Cloud Run revision, GCS document delivery, and the real-phone retest remain release checks.
 
----
+The previous Cloud Run callback served a different application version with an unsafe direct-processing route. Its Meta subscription was disabled. Keep Meta disconnected until that route is contained and the corrected revision is verified. [The incident record](WHATSAPP_P0_INCIDENT.md) preserves the evidence.
 
-## 1. Architecture & Services
+## Container and entry point
 
-The Clandexis system deploys as a single, high-performance containerized Cloud Run service that serves:
-1. **Meta WhatsApp Graph API v21.0 Webhook Receiver** (`POST /webhook` with HMAC-SHA256 signature verification).
-2. **Interactive Multimodal Transaction Extractor API** (`/api/v1/extract/text` and `/api/v1/extract/media`).
-3. **Claude Canonical Ledger & Codex Confirmation Adapter** (`/api/v1/dashboard/*` & Firestore multi-doc ACID transactions).
-4. **Judge & Merchant Live Dashboard** (`GET /dashboard/` - React 18 + Vite + Tailwind CSS static assets).
+The existing Dockerfile builds React/Vite assets, installs Python requirements, and serves the frontend/API from one FastAPI process:
 
----
-
-## 2. Environment Configuration & Secret Management
-
-All sensitive secrets are managed via Google Cloud Secret Manager or Cloud Run environment variables.
-
-| Variable Name | Required | Description | Example / Recommended Source |
-| :--- | :---: | :--- | :--- |
-| `GCP_PROJECT_ID` | **Yes** | Project ID | `clandexis` |
-| `GCP_REGION` | **Yes** | Deployment region | `asia-south1` (Mumbai) |
-| `PORT` | **Yes** | Container port injected by Cloud Run | `8080` |
-| `ENVIRONMENT` | **Yes** | Execution profile | `production` |
-| `GEMINI_API_KEY` | **Yes** | API Key for Gemini 3.8/3.5 Flash | Injected from Google Cloud Secret Manager |
-| `META_WHATSAPP_TOKEN` | Optional | WhatsApp Cloud API Access Token | Graph API system user token |
-| `META_PHONE_NUMBER_ID`| Optional | WABA Phone Number Identifier | Found in Meta App Dashboard |
-| `META_APP_SECRET` | Optional | Meta App Secret for HMAC checks | Secret Manager `meta-app-secret` |
-| `META_VERIFY_TOKEN` | Optional | Webhook challenge handshake token | String matching Meta Webhook subscription |
-| `FIRESTORE_DATABASE` | Optional | Database identifier | `(default)` |
-| `HIGH_CREDIT_THRESHOLD` | Optional | Udhaar safety trigger threshold | `5000` (₹5,000 INR) |
-| `CONFIDENCE_THRESHOLD` | Optional | Extraction confidence gate | `0.85` |
-
----
-
-## 3. Container Entry Point & Health Check
-
-- **Entry Point**: `uvicorn webhook_service.main:app --host 0.0.0.0 --port ${PORT}`
-- **Health Check Endpoint**: `GET http://localhost:8080/health`
-  - Returns `200 OK` with `{"status": "healthy", "service": "webhook-service", "channel": "meta_whatsapp", "api_version": "v21.0"}`
-
----
-
-## 4. Google Cloud Run Deployment Steps
-
-### Step 1: Authenticate with GCP
-```bash
-gcloud auth login
-gcloud config set project clandexis
+```text
+uvicorn webhook_service.main:app --host 0.0.0.0 --port ${PORT}
 ```
 
-### Step 2: Enable Required Google Cloud APIs
+Where Docker is available, the build command is:
+
 ```bash
-gcloud services enable \
-  run.googleapis.com \
-  containerregistry.googleapis.com \
-  cloudbuild.googleapis.com \
-  firestore.googleapis.com \
-  secretmanager.googleapis.com \
-  --project=clandexis
+docker build -t clandexis:local .
 ```
 
-### Step 3: Service Account & Minimum IAM Permissions
-Ensure the Cloud Run Service Account (`clandexis-runner@clandexis.iam.gserviceaccount.com`) has the minimum required roles:
-- `roles/datastore.user` (Read/write access to Cloud Firestore)
-- `roles/secretmanager.secretAccessor` (Read API keys from Secret Manager)
-- `roles/logging.logWriter` (Write Cloud Logging entries)
+Container build and cloud deployment were outside the recorded local verification. The Vite build and Python application tests passed independently. `.dockerignore` excludes runtime environment files, credentials, private keys, virtual environments, and generated artifacts.
 
-### Step 4: Deploy Container to Cloud Run
-Run the deployment script from the project root:
-```bash
-chmod +x deploy.sh
-./deploy.sh
+The existing `deploy.sh` supplies legacy GCP settings. Prepare explicit PostgreSQL, session, origin, and storage configuration below when deploying the corrected revision.
+
+## Runtime configuration
+
+| Area | Required configuration |
+| --- | --- |
+| Persistence | `DATABASE_BACKEND=postgres`, `DATABASE_URL` |
+| Runtime | `ENVIRONMENT=production`; use the platform's `PORT` |
+| Dashboard | `DASHBOARD_SESSION_SECRET`, `DASHBOARD_DEMO_USERNAME`, `DASHBOARD_DEMO_PASSWORD`, existing `DASHBOARD_DEMO_MERCHANT_ID` |
+| Browser access | `TRUSTED_ORIGINS` containing the exact public HTTPS origin |
+| Extraction | `GEMINI_API_KEY`; optional `GEMINI_MODEL` and `GEMINI_FALLBACK_MODEL` |
+| Service outbound | Separate `INTERNAL_SEND_TOKEN` |
+| Invoice storage | `GCS_BUCKET_NAME` and storage/signing credentials |
+| WhatsApp release | Approved phone map and Meta settings from [integration setup](WHATSAPP_INTEGRATION.md) |
+
+Inject credentials through the team's deployment secret management. Keep environment files out of the image and credential values out of command logs.
+
+## Cloud SQL
+
+The provided instance connection name is `clandexis:asia-south1:clandexis`. It identifies the instance. The application also needs a database name, database login, and configured authentication path. A Google-managed Cloud SQL service-agent email supplies infrastructure identity rather than database login credentials.
+
+1. Install [the schema](../models/postgres_schema.sql) in the selected empty database.
+2. Give the application a dedicated runtime role with the privileges described in [PostgreSQL setup](POSTGRES_MIGRATION.md).
+3. Configure the approved Cloud SQL Auth Proxy/socket connection or direct TCP connection with `sslmode=verify-full` and its CA.
+4. Create/transfer approved demo merchants and configure their UUIDs in the phone map and dashboard account.
+5. Exercise the complete flow in the approved isolated database before production cutover.
+
+Every application connection sets the trusted merchant context. Queries from a restricted login without `app.merchant_id` can legitimately return zero rows because of row-level security. Use the authorized merchant UUID when inspecting its data:
+
+```sql
+BEGIN;
+SELECT set_config('app.merchant_id', 'APPROVED_MERCHANT_UUID', true);
+SELECT intent, total_amount, amount_paid, credit_amount
+FROM transactions
+ORDER BY committed_at DESC;
+COMMIT;
 ```
-Or execute directly via `gcloud`:
-```bash
-gcloud run deploy invisible-erp \
-  --source . \
-  --region asia-south1 \
-  --platform managed \
-  --allow-unauthenticated \
-  --set-env-vars GCP_PROJECT_ID=clandexis,GCP_REGION=asia-south1,ENVIRONMENT=production \
-  --set-secrets GEMINI_API_KEY=gemini-api-key:latest
-```
 
----
+## Invoice storage
 
-## 5. Judge Live Dashboard Verification
+Cloud operation uses the configured GCS bucket when `INVOICE_LOCAL_ROOT` is unset. The runtime identity needs object upload/read access and signing capability for the existing V4 URL resolver. Verify both an authenticated dashboard download and an actual WhatsApp document delivery.
 
-Once deployed or running locally:
-- **Dashboard URL**: `http://<service-url>/dashboard/`
-- **Interactive Swagger Docs**: `http://<service-url>/docs`
-- **Seeded Merchant Account**: `+919876543210` (Sri Balaji Textiles, Rajesh Kumar)
-- **Live Counterparties**: Ramesh Textiles, Suresh Traders
-- **Master Inventory**: Cotton Shirts (L) [300 pcs @ ₹200], Linen Kurta (M) [150 pcs @ ₹450]
+Local filesystem storage is used by the development launcher. Persistent cloud storage must be configured for the deployed service. A signing/upload failure reports `PENDING_RETRY` and leaves the financial commit intact.
 
----
+## Revision and security verification
 
-## 6. Exact Remaining Integration Blockers & Mitigations
+Run these checks on the exact deployment that will receive Meta events:
 
-1. **GCP Application Default Credentials (ADC) on Local Workstations**:
-   - *Observation*: Local workstations do not automatically have ADC unless `gcloud auth application-default login` or a service account key is exported in `GOOGLE_APPLICATION_CREDENTIALS`.
-   - *Status*: The test suites utilize `test_ledger_emulator.py`, `test_confirmation.py`, and `test_confirmation_ledger_adapter.py` which run in-memory and on mocks without requiring live cloud authentication. Live Cloud Run handles this natively via its attached Compute Engine / IAM service account.
-2. **Meta WhatsApp Business Account (WABA) Webhook Validation**:
-   - *Observation*: Meta requires a publicly reachable HTTPS callback URL to complete webhook subscription.
-   - *Resolution*: Once deployed on Cloud Run, provide `https://<cloud-run-url>/webhook` and the configured `META_VERIFY_TOKEN` in the Meta App Developer Portal.
+- `GET /health` returns the intended `database_backend`. Confirm actual database reads/writes separately.
+- `GET /openapi.json` contains the dashboard/extraction routes. `/api/v1/process-inbound` is absent.
+- Anonymous dashboard requests fail, wrong-merchant access fails, and mutations require CSRF.
+- The origin allowlist contains the deployed dashboard origin.
+- `POST /webhook` rejects invalid signatures; its GET challenge succeeds with the configured token.
+- `POST /api/v1/send` requires the internal service token.
+- An approved sale commits once, repayment preserves sales/stock, and invoice totals match committed amounts.
+- A second approved phone has independent records. Unknown senders receive no merchant access.
+- Build metadata and the team's release record identify the exact source commit and deployed revision.
+
+A health response alone establishes process availability. The full checks establish application integration.
+
+## Meta reconnection
+
+After containing the old route and verifying the corrected revision, register that deployment's HTTPS `/webhook`, verify its GET challenge, and subscribe to `messages`. Check the actual business phone resource and the allowed test recipient. Then record evidence for outbound acceptance/delivery, an incoming Meta message ID, clarification, candidate-specific confirmation, voice extraction, and document delivery.
+
+Local mocked transport tests and the previous old-revision conversation provide separate evidence from this corrected live release.

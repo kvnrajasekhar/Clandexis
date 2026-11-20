@@ -1,182 +1,118 @@
-# Confirmation bridge and committed-sale PDF interface
+# Confirmation and invoice contracts
 
-## Audit and scope
+The application boundary is `app/services/confirmation.py`. Backend selection is in `app/services/persistence.py`. Both FastAPI entry points initialize the selected adapter during lifespan, after runtime configuration is loaded.
 
-The implementation is in `team_clandexis`, the shared project. The parent `clandexis/app` is the earlier extractor project and was left untouched. The pipeline is `app/pipeline.py`; there is no `app/services/pipeline.py` in this checkout. `pdf_service/` was empty, despite the README listing a `pdf-service/` implementation.
+| Backend | Confirmation adapter | Invoice repository |
+| --- | --- | --- |
+| PostgreSQL | `PostgresLedgerAdapter` | `PostgresInvoiceRepository` |
+| Firestore | `ClaudeLedgerAdapter` | `FirestoreInvoiceRepository` |
 
-Previously, `orchestrate_inbound_message` called `PipelineService.process_and_interpret`, selected the first extracted candidate, used the inbound message ID in `CONFIRM_...`/`CANCEL_...` buttons, and reported ACCEPTED candidates as recorded without posting anything. The Meta adapter already normalizes `interactive.button_reply.id` and `interactive.list_reply.id` into `InboundMessage.interactive_id`. That adapter and its credentials/delivery code are unchanged.
+## Candidate lifecycle
 
-Now replies route before extraction. All new transaction candidates require confirmation. Buttons use the ID returned by durable staging, not the proposed ID, message ID, or original message text. Multiple extracted transactions ask for individual submissions instead of silently discarding all but the first. Unsupported query handling remains outside this bridge.
+1. Gemini emits Schema 1.1 candidates.
+2. The pipeline and ledger apply deterministic validation.
+3. `stage_candidate` returns the persisted candidate ID. Repeated source events retain that ID.
+4. Incomplete candidates remain `NEEDS_REVIEW`. Clarification updates the same candidate and revalidates it.
+5. A valid candidate becomes `PENDING_CONFIRMATION` and receives its explicit actions.
+6. Confirm calls the selected backend's `confirm_and_commit`; the candidate becomes `POSTED`, and its transaction is `COMMITTED`.
+7. Cancel creates no financial posting. Rejected and expired candidates cannot post.
 
-The extractor, validator, Firestore entity schema and dashboard are unchanged. `app/services/ledger.py` belongs to Claude and is consumed through an adapter; no ledger implementation was added here.
+The application confirmation window is 30 minutes. Use the stored expiry for decisions. Treat revisions as opaque values returned by the database; PostgreSQL and Firestore use different snapshot serialization for hashes.
 
-## Startup and authentication
-
-The existing webhook lifespan configures:
-
-```python
-from app.services.confirmation import configure_confirmation
-from app.services.confirmation_ledger_adapter import ClaudeLedgerAdapter
-
-configure_confirmation(ClaudeLedgerAdapter())
-```
-
-This uses Claude's existing `get_db()` and application default Google credentials. Missing configuration fails closed; it never falls back to an in-memory ledger. Standalone consumers must configure once at startup too.
-
-`AuthenticatedMerchant(merchant_id)` represents an identity already authenticated and authorized by the caller. It is not a login mechanism. Never construct it from an arbitrary request body's merchant field. The existing webhook verifies the Meta signature and its adapter resolves tenant identity from the sender phone; ledger confirmation independently checks that actor against the merchant. Any additional account/delegate mapping remains the webhook owner's responsibility. No unauthenticated confirmation HTTP route was added.
-
-## Application API and real replies
+## Application interface
 
 ```python
 from app.services.confirmation import AuthenticatedMerchant, handle_confirmation
 
-merchant = AuthenticatedMerchant(authorized_merchant_id)
+# Construct this identity after verified session/sender authorization.
+merchant = AuthenticatedMerchant(authorized_merchant_id, actor_phone=authorized_phone)
 result = handle_confirmation(
     authenticated_merchant=merchant,
     candidate_id=persisted_candidate_id,
-    action="confirm",                    # exactly "confirm" or "cancel"
-    source_event_id="wamid.callback-id",  # callback event, not original extraction ID
+    action="confirm",
+    source_event_id=unique_confirmation_event_id,
 )
-# PostingResult(transaction_id, amount_paid: Decimal,
-#               credit_outstanding: Decimal, inventory_balance: dict[str, Decimal],
-#               posting_status="COMMITTED")
-# Cancel returns "CANCELLED"; it never invokes confirm_and_commit.
 ```
 
-Button IDs use `clx:v1:confirm:<persisted_candidate_id>` and `clx:v1:cancel:<persisted_candidate_id>`. Candidate IDs accept only ASCII letters, digits, underscore and hyphen, up to 128 characters. Malformed/legacy IDs fail closed, never enter the extractor, and do not post. Real WhatsApp message content:
+Confirm returns `PostingResult`:
+
+| Field | Meaning |
+| --- | --- |
+| `transaction_id` | Actual committed transaction ID |
+| `amount_paid` | Actual received amount for this posting |
+| `credit_outstanding` | Party balance at posting when available; otherwise the transaction credit |
+| `inventory_balance` | Affected product balances at posting |
+| `posting_status` | `COMMITTED` |
+
+Cancel returns `CANCELLED`. Decimal amounts come from persisted results. A replay reflects its original posting snapshot; read the dashboard/party view for current balances after later transactions.
+
+## WhatsApp actions
+
+Buttons encode the persisted candidate ID:
+
+```text
+clx:v1:confirm:<candidate_id>
+clx:v1:cancel:<candidate_id>
+```
+
+The adapter extracts real `interactive.button_reply.id` and `interactive.list_reply.id`. Malformed IDs fail before extraction. The WhatsApp application rejects bare YES/NO and withholds Confirm while clarification is required. Merchant scope, expiry, revision, and validation gates are checked again before commit.
+
+The bridge depends on the ledger operations below. Each operation is scoped to the authorized merchant:
+
+- Stage and read a persisted candidate.
+- Replace a reviewed candidate under its expected revision.
+- Confirm and commit atomically under the callback request ID.
+- Cancel a candidate.
+- Read the committed transaction and its recorded movements/results.
+
+The SQL adapter reuses canonical planning from `app/services/ledger.py`. [The Firestore reference](LEDGER_INTERFACE.md) documents that backend's detailed method signatures. PostgreSQL setup and transfer behavior are in [the migration guide](POSTGRES_MIGRATION.md).
+
+## Dashboard API
+
+All routes below require the verified session. Mutations also require `X-CSRF-Token`.
+
+| Method and path | Purpose |
+| --- | --- |
+| `POST /api/v1/extract/text` | Extract/validate; `stage=true` persists eligible candidates |
+| `POST /api/v1/extract/media` | Multipart media extraction with the same staging option |
+| `GET /api/v1/dashboard/candidates` | Candidate IDs, revisions, statuses, and facts |
+| `POST /api/v1/dashboard/candidates/{id}/clarify` | Apply an answer using `answer` and the current `revision` |
+| `POST /api/v1/dashboard/candidates/{id}/review` | Explicit corrected candidate and review note |
+| `POST /api/v1/dashboard/candidates/confirm` | Confirm the supplied persisted `candidate_id` |
+| `POST /api/v1/dashboard/candidates/cancel` | Cancel the supplied persisted `candidate_id` |
+| `GET /api/v1/dashboard/transactions/{id}/invoice` | Authenticated invoice download or signed-URL redirect |
+
+A confirmation request uses this shape after the displayed candidate has been reviewed:
 
 ```json
 {
-  "from": "919876543210",
-  "id": "wamid.callback-id",
-  "timestamp": "1795132800",
-  "type": "interactive",
-  "interactive": {
-    "type": "button_reply",
-    "button_reply": {
-      "id": "clx:v1:confirm:cand_REPLACE_WITH_PERSISTED_ID",
-      "title": "Confirm"
-    }
-  }
+  "candidate_id": "PERSISTED_CANDIDATE_ID",
+  "source_event_id": "dashboard:UNIQUE_ACTION_ID"
 }
 ```
 
-The existing adapter parses this; `ConfirmationService.parse_reply` validates the ID. Button titles never authorize actions. Exact text `YES`/`NO` (case-insensitive) works only if the authenticated merchant has exactly one unexpired active persisted candidate. Zero or multiple candidates require buttons. Ordinary correction messages are not interpreted as an approval.
+Legacy merchant/actor fields are compatibility checks. Authorization comes from the signed session. [Security configuration](P0_APPLICATION_INTEGRATION.md) includes a login example.
 
-Staging requests a 30-minute expiry. Retry staging is idempotent on merchant, source event and candidate index and preserves the original persisted ID/expiry. Expired pending candidates fail. Repeated Confirm on a committed candidate returns its original transaction. Repeated Cancel remains cancelled. Confirm after Cancel and Cancel after commit fail. A callback reused for a different candidate must raise Claude's `IdempotencyConflictError`.
-
-## Review gate and Claude integration
-
-ACCEPTED candidates are revalidated on a copy with the existing `BusinessValidator` before commit. REJECTED candidates cannot confirm or be reviewed into approval: submit a new corrected candidate. NEEDS_REVIEW, missing fields, clarification flags and unresolved original review flags block posting. A normal Confirm tap does not constitute review.
-
-Application review API:
+## Committed-sale PDF interface
 
 ```python
-from app.services.confirmation import get_confirmation_service
-from app.schemas.transaction import TransactionCandidate
+from pdf_service import InvoiceService
 
-corrected = TransactionCandidate.model_validate(merchant_verified_full_candidate)
-reviewed = get_confirmation_service().resolve_review(
-    merchant, persisted_candidate_id, corrected,
-    review_note="Merchant verified buyer, quantities, payment and credit against source bill",
-)
-# Still unposted. A subsequent Confirm uses the persisted reviewed candidate.
-```
-
-The bridge clears old clarification/review flags on the supplied complete facts and runs the existing validator again; unresolved deterministic warnings or missing fields still block. Claude's current ledger provides the atomic `review_candidate` method, and the production adapter calls it with the exact signature below. Real emulator tests cover this review-to-confirm path. The bridge never directly overwrites a ledger snapshot:
-
-```python
-review_candidate(
-    merchant_id: str,
-    candidate_id: str,
-    *,
-    reviewed_by: str,
-    corrected_candidate: TransactionCandidate,
-    review_note: str,
-    expected_snapshot_sha256: str,
-    db=None,
-    now=None,
+artifact = InvoiceService(repository, artifact_store).generate_document(
+    authenticated_merchant, committed_transaction_id
 )
 ```
 
-Ledger atomic behavior: authorize reviewer, check tenant, pending state, expiry and expected hash; reject original REJECTED or terminal candidates; revalidate corrected facts; preserve the original snapshot/review provenance and append audit history; persist the reviewed snapshot with its new hash and `review_resolved=True`; retain immutable `originally_needs_review=True` when review was originally required; never post as part of review. Confirmation must recheck these gates atomically. Return value is not used: the adapter re-reads the persisted candidate.
+The repository supplies `CommittedSale` from database records. It contains merchant/buyer names, invoice number/date/currency, items, quantities, prices, subtotal, discounts, tax, total, paid, and due. Monetary reconciliation runs before rendering. PostgreSQL invoice facts are captured with the sale; artifact generation follows the ledger commit.
 
-## Exact existing ledger dependencies
+`InvoiceArtifact` associates merchant ID, transaction ID, storage key, SHA-256, filename, and PDF content type. Artifacts use content-addressed storage and a retry-safe association. Local storage serves authenticated downloads. GCS storage uploads immutable content and can resolve signed document URLs for the sender.
 
-`ClaudeLedgerAdapter` invokes these existing public functions:
+The PDF is labeled a basic invoice. Implemented tax-rule verification and merchant tax details are prerequisites for claiming tax compliance.
 
-| Function | Bridge arguments/use |
-| --- | --- |
-| `get_db()` | Shared Firestore client; no separate ledger store |
-| `stage_candidate(merchant_id, source_message_id, candidate, *, candidate_index, ttl, db, now)` | Preserve returned `candidate_id`; no direct candidate writes |
-| `confirm_and_commit(merchant_id, candidate_id, *, confirmed_by, confirmation_request_id, expected_snapshot_sha256, db, now)` | Callback ID is request ID; snapshot hash prevents stale confirmation |
-| `cancel_candidate(merchant_id, candidate_id, *, cancelled_by, reason, db, now)` | Reason records callback ID; no financial posting |
-| `get_transaction(merchant_id, txn_id, *, db)` | Read committed transaction and referenced movement IDs |
-| `LedgerError` and subclasses | Translate known application failures into safe confirmation errors |
+## Failure and retry behavior
 
-The adapter reads `merchants/{merchant_id}/transaction_candidates/{candidate_id}` with `extracted_snapshot`, `snapshot_sha256`, `expires_at`, `posting_status`, `validation_status`, and persisted review metadata. It maps `PENDING_CONFIRMATION` to `AWAITING_CONFIRMATION`, `POSTED` to `COMMITTED`, and retains terminal states. Existing NEEDS_REVIEW ledger holds remain blocked by the application gate.
+Generation or storage failure returns invoice status `PENDING_RETRY` while preserving the sale. Repeating authenticated confirmation with a new action event can replay the commit and retry document generation. Repeated delivery of the same WhatsApp event can return its cached reply without rendering again.
 
-`CommitResult` must contain matching merchant ID, `txn_id`, `status="COMMITTED"`, `received_amount`, and `credit_amount`. Paid/credit in the response come from this persisted commit result. Inventory balances come from the committed transaction's ordered `movement_ids`, reading each movement's `sku_id`, `reference_txn_id` and `balance_after`. This returns the balance at posting even on a later duplicate callback, rather than querying current stock. Credit outstanding means credit on this transaction; it is not the party's aggregate preexisting debt.
+A repayment returns invoice status `NOT_APPLICABLE`. It updates receivables without creating another sale invoice or moving stock. Rendering, uploads, signed URL creation, and Meta calls run outside ledger transaction callbacks.
 
-Atomic exactly-once posting, callback binding, authorization, hash checks, financial invariants, inventory updates and commit-result persistence remain Claude's ledger responsibilities. Application checks complement them and cannot replace them. No WhatsApp, PDF rendering, or object storage call occurs in a Firestore posting callback.
-
-## Document API and webhook sender example
-
-```python
-from pdf_service import InvoiceService, LocalArtifactStore
-from pdf_service.firestore_repository import FirestoreInvoiceRepository
-from models.canonical import OutboundMessage, MessageType
-
-invoices = InvoiceService(
-    FirestoreInvoiceRepository(),
-    LocalArtifactStore("/durable/invoices"),
-)
-artifact = invoices.generate_document(merchant, result.transaction_id)
-# artifact: merchant_id, transaction_id, storage_key, sha256,
-#           filename, content_type="application/pdf"
-
-# Sender-owned storage/delivery integration:
-# Publish the PDF at root / artifact.storage_key to durable object storage,
-# or inject an ArtifactStore with put_if_absent(key, content) at construction.
-# Resolve a fetchable HTTPS URL using the sender's existing storage mechanism.
-outbound = OutboundMessage(
-    recipient_phone=authorized_recipient_phone,
-    message_type=MessageType.DOCUMENT,
-    document_url=fetchable_https_pdf_url,
-    document_filename=artifact.filename,
-)
-# await meta_service.dispatch_outbound(outbound) -- after every DB callback returns
-```
-
-The webhook worker now automatically runs `generate_posting_document` after a committed result, sends the posting response, and dispatches a document when a fetchable URL is available. Dashboard confirmation invokes the same document flow. Default storage is GCS with immutable uploads and short-lived signed URLs; `INVOICE_LOCAL_ROOT` selects development or durable-volume storage without an automatic public URL. Local filesystem paths are not valid Meta document URLs. Signing or storage failures return `PENDING_RETRY` and do not undo the sale. Meta credentials are unchanged.
-
-`InvoiceService` accepts only an authoritative `InvoiceRepository.get_committed_sale(merchant_id, transaction_id)` read model, revalidates it, verifies tenant/transaction ownership, and requires `COMMITTED` + `SALE_INVOICE`. It does not accept an extraction request body. The included Firestore repository reads Claude's committed transaction plus the merchant's database record. Missing/inconsistent database amounts fail instead of being invented.
-
-The invoice includes merchant/buyer, stable invoice number (committed invoice number or transaction ID), business date, currency, wrapped item descriptions, quantities/units, prices, per-line discounts, subtotal, invoice discount, recorded tax, total, paid and due. Paid/credit/total/tax use committed integer minor units. Subtotal uses committed line amounts; the displayed invoice discount is the difference reconciled against committed total and tax. No tax rate or GST rule is inferred. Merchant details are current database details; immutable merchant/buyer address snapshots are a future ledger enhancement.
-
-Claude's ledger v1.0 explicitly denominates its amounts in INR, so its adapter uses INR when that version lacks a currency field. Other versions must provide committed currency. The PDF read model also supports USD; **the current INR ledger cannot represent a USD sale merely because extraction said USD**. Cross-currency ledger posting remains outside this change.
-
-All output is explicitly **BASIC INVOICE**, with “Not a GST tax invoice. No GST compliance certification.” Recorded tax can be displayed without claiming tax compliance. The service does not implement GST calculations, certification or KMS signing.
-
-## Artifact retry and failure behavior
-
-PDF bytes use ReportLab invariant mode. Artifact keys combine a hash of merchant/transaction identity and PDF content SHA-256. Local writes use a temporary file, fsync and an atomic no-overwrite link; retries cannot expose partial files. Production ArtifactStore implementations must preserve immutable put-if-absent semantics.
-
-After storage succeeds, the Firestore repository separately associates one `InvoiceArtifact` at:
-
-`merchants/{merchant_id}/transactions/{transaction_id}/invoice_artifacts/basic_v1`
-
-The association transaction reads the committed sale and artifact first, creates only artifact metadata if absent, and returns the original metadata on retry/concurrent generation. It does not rewrite sale, stock, party, payment or journal records. Sale posting and document generation are separate operations: render/storage/association failure leaves the sale committed and can be retried by transaction ID. A failure after storage may leave an unassociated immutable file; retry recovers it. Concurrent changed merchant details may create an unused content-addressed file, but only one artifact is associated. Object cleanup and delivery retries belong to the worker/storage owner.
-
-## Verification
-
-Run from `team_clandexis`:
-
-```bash
-.venv/bin/python -m pip install -r requirements-dev.txt
-PYTHONPATH=. .venv/bin/python -m pytest tests -q
-```
-
-The P0 integration suite now runs against the actual Firestore emulator, including HTTP sessions, callback routing, sale/repayment/review, duplicate callbacks, real ReportLab PDFs, artifact association, and outgoing message recording. See [P0_APPLICATION_INTEGRATION.md](P0_APPLICATION_INTEGRATION.md) for the latest results, authentication setup, deployment dependencies, and exact run command. Only external Meta delivery is recorded in tests; no test messages are sent to real customers.
-
-Synthetic fixture previews (not real customer invoices) were generated in `output/pdf/committed-basic-invoice-inr.pdf` and `output/pdf/committed-basic-invoice-usd.pdf`: 32 items, long merchant/buyer names, five pages each. All ten pages were rendered with Poppler and visually inspected for wrapping, row breaks, repeated headers, totals and footers. ReportLab's [table documentation](https://docs.reportlab.com/reportlab/userguide/ch7_tables/) informs the repeating/splitting table layout.
+[TESTING.md](TESTING.md) records the verification coverage and service boundaries.
