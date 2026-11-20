@@ -24,6 +24,7 @@ class InputProcessor:
         raw_text: Optional[str] = None,
         media_path: Optional[Union[str, Path]] = None,
         media_bytes: Optional[bytes] = None,
+        mime_type: Optional[str] = None,
     ) -> Tuple[ProcessedInputPayload, Optional[bytes], Optional[str]]:
         """
         Process incoming merchant message and return normalized payload.
@@ -32,7 +33,6 @@ class InputProcessor:
             raise ValueError("merchant_id is required.")
 
         file_bytes = media_bytes
-        mime_type = None
 
         if media_path:
             p = Path(media_path)

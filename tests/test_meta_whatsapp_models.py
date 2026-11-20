@@ -13,6 +13,13 @@ from webhook_service.meta_whatsapp_handler import MetaWhatsAppService
 from webhook_service.security import verify_meta_signature
 
 
+@pytest.fixture
+def mapped_service(monkeypatch):
+    monkeypatch.setattr("webhook_service.meta_whatsapp_handler.resolve_sender",
+                        lambda phone: "textile-demo" if phone == "+919876543210" else None)
+    return MetaWhatsAppService(token="test-token", phone_number_id="PHONE_NUM_ID_6789")
+
+
 def test_verify_meta_signature():
     app_secret = "test_meta_secret_123"
     payload = b'{"object":"whatsapp_business_account","entry":[]}'
@@ -26,7 +33,7 @@ def test_verify_meta_signature():
     assert verify_meta_signature(payload, None, app_secret) is False
 
 
-def test_meta_webhook_text_parsing():
+def test_meta_webhook_text_parsing(mapped_service):
     raw_payload = {
         "object": "whatsapp_business_account",
         "entry": [
@@ -63,20 +70,27 @@ def test_meta_webhook_text_parsing():
         ],
     }
 
-    service = MetaWhatsAppService(token="fake_token", phone_number_id="fake_phone_id")
+    service = mapped_service
     inbound_msgs = service.parse_webhook_payload(raw_payload)
 
     assert len(inbound_msgs) == 1
     msg = inbound_msgs[0]
     assert msg.message_id == "wamid.HBgLMTIzNDU2"
     assert msg.sender_phone == "+919876543210"
+    assert msg.tenant_id == "textile-demo"
+    value = raw_payload["entry"][0]["changes"][0]["value"]
+    value["messages"][0]["from"] = "15551234567"
+    assert service.parse_webhook_payload(raw_payload) == []
+    value["messages"][0]["from"] = "919876543210"
+    value["metadata"]["phone_number_id"] = "another-business"
+    assert service.parse_webhook_payload(raw_payload) == []
     assert msg.sender_name == "Rajesh Kumar"
     assert msg.channel == ChannelType.META_WHATSAPP
     assert msg.message_type == MessageType.TEXT
     assert msg.text_content == "Aaj 200 cotton shirts banayi hain"
 
 
-def test_meta_webhook_voice_note_parsing():
+def test_meta_webhook_voice_note_parsing(mapped_service):
     raw_payload = {
         "object": "whatsapp_business_account",
         "entry": [
@@ -112,7 +126,7 @@ def test_meta_webhook_voice_note_parsing():
         ],
     }
 
-    service = MetaWhatsAppService()
+    service = mapped_service
     inbound_msgs = service.parse_webhook_payload(raw_payload)
 
     assert len(inbound_msgs) == 1
@@ -123,7 +137,7 @@ def test_meta_webhook_voice_note_parsing():
     assert msg.media_mime_type == "audio/ogg; codecs=opus"
 
 
-def test_meta_webhook_interactive_button_click():
+def test_meta_webhook_interactive_button_click(mapped_service):
     raw_payload = {
         "object": "whatsapp_business_account",
         "entry": [
@@ -160,7 +174,7 @@ def test_meta_webhook_interactive_button_click():
         ],
     }
 
-    service = MetaWhatsAppService()
+    service = mapped_service
     inbound_msgs = service.parse_webhook_payload(raw_payload)
 
     assert len(inbound_msgs) == 1

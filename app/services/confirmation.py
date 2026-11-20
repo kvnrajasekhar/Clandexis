@@ -22,6 +22,7 @@ class ConfirmationError(ValueError):
 class AuthenticatedMerchant:
     # Construct ONLY after transport authentication and merchant authorization.
     merchant_id: str
+    actor_phone: str | None = None
 
 
 @dataclass(frozen=True)
@@ -58,10 +59,10 @@ class LedgerService(Protocol):
                                    review_note: str, now: datetime) -> StoredCandidate: ...
     def confirm_candidate(self, merchant_id: str, candidate_id: str,
                           source_event_id: str, expected_revision: int | str,
-                          now: datetime) -> PostingResult: ...
+                          now: datetime, *, actor_phone: str | None = None) -> PostingResult: ...
     def cancel_candidate(self, merchant_id: str, candidate_id: str,
                          source_event_id: str, expected_revision: int | str,
-                         now: datetime) -> str: ...
+                         now: datetime, *, actor_phone: str | None = None) -> str: ...
 
 
 _ID = re.compile(r"^clx:v1:(confirm|cancel):([A-Za-z0-9_-]{1,128})$")
@@ -164,9 +165,11 @@ class ConfirmationService:
                 self._valid(BusinessValidator.validate_candidate(row.candidate.model_copy(deep=True)))
         if action == "cancel":
             return self.ledger.cancel_candidate(authenticated_merchant.merchant_id, candidate_id,
-                                                source_event_id, row.revision, self.clock())
+                                                source_event_id, row.revision, self.clock(),
+                                              actor_phone=authenticated_merchant.actor_phone)
         result = self.ledger.confirm_candidate(authenticated_merchant.merchant_id, candidate_id,
-                                              source_event_id, row.revision, self.clock())
+                                              source_event_id, row.revision, self.clock(),
+                                              actor_phone=authenticated_merchant.actor_phone)
         if not isinstance(result, PostingResult) or result.posting_status != "COMMITTED":
             raise RuntimeError("Ledger must return a persisted COMMITTED PostingResult.")
         return result

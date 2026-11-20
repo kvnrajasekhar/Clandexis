@@ -43,3 +43,19 @@ def test_environment_override(monkeypatch):
     assert custom_settings.GCP_PROJECT_ID == "clandexis-prod-2026"
     assert custom_settings.HIGH_CREDIT_THRESHOLD == 10000.00
     assert custom_settings.is_production is True
+
+
+def test_whatsapp_aliases_and_explicit_disable(monkeypatch):
+    pairs = {
+        'META_VERIFY_TOKEN': 'WHATSAPP_VERIFY_TOKEN',
+        'META_WHATSAPP_TOKEN': 'WHATSAPP_ACCESS_TOKEN',
+        'META_PHONE_NUMBER_ID': 'WHATSAPP_PHONE_NUMBER_ID',
+        'META_APP_SECRET': 'META-WHATSAPP_APP_SECRET',
+    }
+    for primary, alias in pairs.items():
+        monkeypatch.delenv(primary, raising=False)
+        monkeypatch.setenv(alias, 'test-value')
+    assert all(getattr(Settings(), key) == 'test-value' for key in pairs)
+    for primary in pairs:
+        monkeypatch.setenv(primary, '')
+    assert all(getattr(Settings(), key) == '' for key in pairs)

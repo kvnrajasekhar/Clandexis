@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 
 from config import settings
-from models.canonical import InboundMessage, OutboundMessage
+from models.canonical import InboundMessage, MessageType, OutboundMessage
 from app.api.v1 import api_router
 from .meta_whatsapp_handler import MetaWhatsAppService
 from .security import verify_meta_signature
@@ -148,14 +148,24 @@ async def process_inbound_message(message: InboundMessage):
     logger.info(f"Processing inbound message {message.message_id} in background pipeline...")
     try:
         from agent_orchestrator import orchestrate_inbound_message
-        result, outbound = orchestrate_inbound_message(message)
+        media_bytes = None
+        if message.message_type in (MessageType.AUDIO, MessageType.IMAGE, MessageType.DOCUMENT):
+            if meta_service is None:
+                return
+            if message.media_id and message.media_mime_type:
+                media_bytes = await meta_service.download_media_bytes(message.media_id)
+            if not media_bytes:
+                await meta_service.dispatch_outbound(OutboundMessage(
+                    recipient_phone=message.sender_phone,
+                    text_content="Could not read the attachment. Please resend it or send the details as text."))
+                return
+        result, outbound = orchestrate_inbound_message(message, media_bytes=media_bytes)
         logger.info("Orchestration completed for %s (%s)", message.message_id, type(result).__name__)
         
         # Generate only after a successful ledger result; all side effects are
         # outside Firestore callbacks. Invoice errors never undo the committed sale.
         from app.services.confirmation import AuthenticatedMerchant, PostingResult
         from app.services.posting_flow import generate_posting_document
-        from models.canonical import MessageType
         document = None
         if isinstance(result, PostingResult):
             document = generate_posting_document(AuthenticatedMerchant(message.tenant_id), result)

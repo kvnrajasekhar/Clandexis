@@ -28,6 +28,7 @@ from webhook_service.meta_whatsapp_handler import MetaWhatsAppService
 class MetaRecorder(MetaWhatsAppService):
     def __init__(self):
         self.sent = []
+        self.phone_number_id = "phone"
 
     async def close(self):
         pass
@@ -39,6 +40,7 @@ class MetaRecorder(MetaWhatsAppService):
 
 @pytest.fixture
 def app_client(db, mid, monkeypatch, tmp_path):
+    db.collection("merchants").document(mid).update({"authorized_phones": [mid]})
     configure_demo(monkeypatch, mid)
     monkeypatch.setattr(ledger, "_client", db)
     recorder = MetaRecorder()
@@ -58,6 +60,10 @@ def callback(client, mid, candidate_id, event="wamid.tap"):
                       "interactive": {"type": "button_reply", "button_reply": {
                           "id": button_id(candidate_id, "confirm"), "title": "Confirm"}}}]
     }}]}]}
+    return signed_callback(client, payload)
+
+
+def signed_callback(client, payload):
     body = json.dumps(payload).encode()
     signature = hmac.new(META_SECRET.encode(), body, hashlib.sha256).hexdigest()
     return client.post("/webhook", content=body, headers={"Content-Type": "application/json", "X-Hub-Signature-256": "sha256=" + signature})
@@ -171,7 +177,7 @@ def test_signed_webhook_cannot_confirm_other_merchants_sale(app_client, db, mid)
     row = get_confirmation_service().stage(AuthenticatedMerchant(mid), "wamid.owner-sale", 0, sale())
     assert callback(client, "+910000000000", row.candidate_id).status_code == 200
     assert count(db, mid, "transactions") == 0 and not list(root.rglob("*.pdf"))
-    assert "unavailable" in sender.sent[0].text_content.lower()
+    assert sender.sent == []
 
 
 def test_both_application_entrypoints_use_same_authenticated_bridge(app_client, db, mid):
@@ -257,3 +263,67 @@ def test_clarification_reply_is_scoped_to_candidate_revision(app_client, db, mid
     assert response.json()["candidate_id"] == row.candidate_id
     assert client.post(url, json=payload).status_code == 409
     assert count(db, mid, "transactions") == 0
+
+
+def test_mapped_voice_to_gemini_and_confirmation(app_client, db, mid, monkeypatch):
+    from types import SimpleNamespace
+    import httpx
+    import agent_orchestrator.orchestrator as orchestrator
+    from app.pipeline import PipelineService
+    from app.services import interpreter
+
+    client, meta, _ = app_client
+    # Separate identities, even when the tenant ID itself resembles a phone number.
+    phone = "+14155550123"
+    ref = db.collection("merchants").document(mid)
+    ref.update({"authorized_phones": [phone]})
+    generated = []
+    media = b"OggS fixture audio bytes"
+
+    def generate_content(**request):
+        generated.append(request["contents"][0].inline_data)
+        return SimpleNamespace(text=json.dumps({"transactions": [sale().model_dump(mode="json")]}))
+
+    monkeypatch.setattr(interpreter, "get_genai_client", lambda: SimpleNamespace(
+        models=SimpleNamespace(generate_content=generate_content)))
+    monkeypatch.setattr(orchestrator, "pipeline", PipelineService())
+
+    requests = []
+    def graph(req):
+        requests.append(req.url.path)
+        if req.url.path == "/v21.0/media42":
+            return httpx.Response(200, json={"url": "https://cdn.test/audio"})
+        return httpx.Response(200, content=media)
+
+    meta.token = "test-token"
+    meta.api_version = "v21.0"
+    meta.graph_base_url = "https://graph.test"
+    meta.http_client = httpx.AsyncClient(transport=httpx.MockTransport(graph))
+    message = {"from": phone[1:], "id": "wamid.voice", "timestamp": "1795132800", "type": "audio",
+               "audio": {"id": "media42", "mime_type": "audio/ogg; codecs=opus"}}
+    value = {"messaging_product": "whatsapp", "metadata": {
+        "display_phone_number": "15550000000", "phone_number_id": "phone"}, "messages": [message]}
+    payload = {"object": "whatsapp_business_account", "entry": [
+        {"id": "waba", "changes": [{"field": "messages", "value": value}]}]}
+    other = db.collection("merchants").document("also-linked")
+    other.set({"authorized_phones": [phone]})
+    try:
+        assert signed_callback(client, payload).json()["messages_received"] == 0
+        assert not requests and not meta.sent
+    finally:
+        other.delete()
+    assert signed_callback(client, payload).json()["messages_received"] == 1
+    assert requests == ["/v21.0/media42", "/audio"]
+    assert [(part.data, part.mime_type) for part in generated] == [(media, "audio/ogg")]
+    assert len(meta.sent) == 1 and meta.sent[0].recipient_phone == phone
+    cid = meta.sent[0].buttons[0].id.split(":")[-1]
+    assert count(db, mid, "transactions") == 0
+    assert callback(client, mid, cid).json()["messages_received"] == 0
+    assert callback(client, phone, cid).json()["messages_received"] == 1
+    tx, = col(db, mid, "transactions").stream()
+    assert tx.to_dict()["confirmed_by"] == phone
+    media = b""
+    message["id"] = "wamid.empty"
+    assert signed_callback(client, payload).json()["messages_received"] == 1
+    assert "resend" in meta.sent[-1].text_content
+    assert len(generated) == 1 and count(db, mid, "transaction_candidates") == 1

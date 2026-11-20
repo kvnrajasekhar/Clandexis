@@ -46,7 +46,7 @@ class LedgerStub:
         self.rows[candidate_id] = row
         return row
 
-    def confirm_candidate(self, merchant_id, candidate_id, source_event_id, expected_revision, now):
+    def confirm_candidate(self, merchant_id, candidate_id, source_event_id, expected_revision, now, *, actor_phone=None):
         with self.lock:
             row = self.get_candidate(merchant_id, candidate_id)
             if row.status == "COMMITTED":
@@ -61,7 +61,7 @@ class LedgerStub:
             self.rows[candidate_id] = replace(row, status="COMMITTED", revision=row.revision + 1)
             return result
 
-    def cancel_candidate(self, merchant_id, candidate_id, source_event_id, expected_revision, now):
+    def cancel_candidate(self, merchant_id, candidate_id, source_event_id, expected_revision, now, *, actor_phone=None):
         with self.lock:
             row = self.get_candidate(merchant_id, candidate_id)
             if row.status == "CANCELLED":

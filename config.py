@@ -20,6 +20,11 @@ else:
     load_dotenv(override=False)
 
 
+def _meta_env(primary: str, *aliases: str):
+    # An explicitly empty primary setting disables the integration in local demos.
+    return next((os.environ[k] for k in (primary, *aliases) if k in os.environ), None)
+
+
 class Settings(BaseModel):
     # ==========================================================================
     # Google Cloud Platform (GCP)
@@ -44,13 +49,13 @@ class Settings(BaseModel):
     # ==========================================================================
     # Meta WhatsApp Business Cloud API (Graph API v21.0)
     # ==========================================================================
-    META_WHATSAPP_TOKEN: Optional[str] = Field(default_factory=lambda: os.getenv("META_WHATSAPP_TOKEN"))
-    META_PHONE_NUMBER_ID: Optional[str] = Field(default_factory=lambda: os.getenv("META_PHONE_NUMBER_ID"))
+    META_WHATSAPP_TOKEN: Optional[str] = Field(default_factory=lambda: _meta_env("META_WHATSAPP_TOKEN", "WHATSAPP_ACCESS_TOKEN"))
+    META_PHONE_NUMBER_ID: Optional[str] = Field(default_factory=lambda: _meta_env("META_PHONE_NUMBER_ID", "WHATSAPP_PHONE_NUMBER_ID"))
     META_WABA_ID: Optional[str] = Field(default_factory=lambda: os.getenv("META_WABA_ID"))
     META_VERIFY_TOKEN: str = Field(
-        default_factory=lambda: os.getenv("META_VERIFY_TOKEN", "")
+        default_factory=lambda: _meta_env("META_VERIFY_TOKEN", "WHATSAPP_VERIFY_TOKEN") or ""
     )
-    META_APP_SECRET: Optional[str] = Field(default_factory=lambda: os.getenv("META_APP_SECRET"))
+    META_APP_SECRET: Optional[str] = Field(default_factory=lambda: _meta_env("META_APP_SECRET", "WHATSAPP_APP_SECRET", "META-WHATSAPP_APP_SECRET"))
     META_API_VERSION: str = Field(default_factory=lambda: os.getenv("META_API_VERSION", "v21.0"))
     META_GRAPH_BASE_URL: str = Field(default_factory=lambda: os.getenv("META_GRAPH_BASE_URL", "https://graph.facebook.com"))
 

@@ -73,10 +73,10 @@ class ClaudeLedgerAdapter:
             raise ConfirmationError("Candidate unavailable, expired or requires review.") from exc
         return self.get_candidate(merchant_id, candidate_id)
 
-    def confirm_candidate(self, merchant_id, candidate_id, source_event_id, expected_revision, now):
+    def confirm_candidate(self, merchant_id, candidate_id, source_event_id, expected_revision, now, *, actor_phone=None):
         try:
             result = self.api.confirm_and_commit(
-                merchant_id, candidate_id, confirmed_by=merchant_id,
+                merchant_id, candidate_id, confirmed_by=actor_phone or merchant_id,
                 confirmation_request_id=source_event_id,
                 expected_snapshot_sha256=expected_revision, db=self.db, now=now)
         except self.api.LedgerError as exc:
@@ -98,9 +98,9 @@ class ClaudeLedgerAdapter:
             balances[row["sku_id"]] = Decimal(str(row["balance_after"]))
         return PostingResult(result.txn_id, result.received_amount, result.credit_amount, balances)
 
-    def cancel_candidate(self, merchant_id, candidate_id, source_event_id, expected_revision, now):
+    def cancel_candidate(self, merchant_id, candidate_id, source_event_id, expected_revision, now, *, actor_phone=None):
         try:
-            result = self.api.cancel_candidate(merchant_id, candidate_id, cancelled_by=merchant_id,
+            result = self.api.cancel_candidate(merchant_id, candidate_id, cancelled_by=actor_phone or merchant_id,
                                                reason=f"Callback {source_event_id}", db=self.db, now=now)
         except self.api.LedgerError as exc:
             raise ConfirmationError("Candidate unavailable, expired or requires review.") from exc

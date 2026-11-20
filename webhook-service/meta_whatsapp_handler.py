@@ -5,7 +5,7 @@ media downloading (voice notes & kacha bills), and outbound message dispatching.
 """
 
 import logging
-import os
+import re
 from typing import Any, Dict, List, Optional
 import httpx
 
@@ -29,6 +29,16 @@ from models.whatsapp_meta import (
 )
 
 logger = logging.getLogger("meta-whatsapp-handler")
+
+def resolve_sender(sender_phone: str) -> Optional[str]:
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    from app.services.ledger import get_db
+
+    matches = list(get_db().collection("merchants").where(
+        filter=FieldFilter("authorized_phones", "array_contains", sender_phone)
+    ).select([]).limit(2).stream())
+    return matches[0].id if len(matches) == 1 else None
+
 
 class MetaWhatsAppService:
     def __init__(
@@ -65,7 +75,7 @@ class MetaWhatsAppService:
         for entry in payload.entry:
             for change in entry.changes:
                 value = change.value
-                if not value.messages:
+                if not value.messages or not self.phone_number_id or value.metadata.phone_number_id != self.phone_number_id:
                     # Ignore status delivery receipts or empty message batches
                     continue
 
@@ -75,7 +85,11 @@ class MetaWhatsAppService:
                     sender_wa_id = msg.from_user
                     sender_phone = f"+{sender_wa_id}" if not sender_wa_id.startswith("+") else sender_wa_id
                     sender_name = contact_map.get(sender_wa_id)
-                    tenant_id = sender_phone  # By default, MSME merchant is identified by E.164 phone
+                    if not re.fullmatch(r"\+[1-9][0-9]{1,14}", sender_phone):
+                        continue
+                    tenant_id = resolve_sender(sender_phone)
+                    if not tenant_id:
+                        continue
 
                     canonical_msg = self._normalize_message(
                         msg=msg,
@@ -186,9 +200,15 @@ class MetaWhatsAppService:
 
         headers = {"Authorization": f"Bearer {self.token}"}
         try:
-            resp = await self.http_client.get(download_url, headers=headers)
-            resp.raise_for_status()
-            return resp.content
+            async with self.http_client.stream("GET", download_url, headers=headers) as resp:
+                resp.raise_for_status()
+                data = bytearray()
+                max_media_bytes = 16 * 1024 * 1024
+                async for chunk in resp.aiter_bytes():
+                    if len(data) + len(chunk) > max_media_bytes:
+                        return None
+                    data.extend(chunk)
+                return bytes(data)
         except Exception as e:
             logger.error("Media download failed (%s)", type(e).__name__)
             return None

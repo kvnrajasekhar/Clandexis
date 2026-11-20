@@ -26,6 +26,7 @@ class PipelineService:
         media_path: Optional[Union[str, Path]] = None,
         media_bytes: Optional[bytes] = None,
         merchant_business_name: Optional[str] = None,
+        mime_type: Optional[str] = None,
     ) -> ProcessingResult:
         # Stage 2: Input processing & Idempotency
         payload_meta, f_bytes, mime_type = self.input_processor.process(
@@ -34,6 +35,7 @@ class PipelineService:
             raw_text=raw_text,
             media_path=media_path,
             media_bytes=media_bytes,
+            mime_type=mime_type,
         )
 
         if payload_meta.is_duplicate:

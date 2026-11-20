@@ -31,14 +31,14 @@ def posting_outbound(phone: str, result: PostingResult) -> OutboundMessage:
         f"Inventory balance: {balances or 'No inventory movement'}"))
 
 
-def orchestrate_inbound_message(message: InboundMessage):
+def orchestrate_inbound_message(message: InboundMessage, *, media_bytes: bytes | None = None):
     """Canonical input must come from the authenticated, merchant-resolved adapter.
 
     Result is ProcessingResult for extraction, PostingResult for commit, None for
     cancellation/errors. Transport dispatch occurs only after this function returns.
     """
     global pipeline
-    merchant = AuthenticatedMerchant(message.tenant_id)
+    merchant = AuthenticatedMerchant(message.tenant_id, actor_phone=message.sender_phone)
     try:
         service = get_confirmation_service()
         reply = service.parse_reply(merchant, message)
@@ -57,7 +57,8 @@ def orchestrate_inbound_message(message: InboundMessage):
         pipeline = PipelineService()
     result = pipeline.process_and_interpret(
         merchant_id=message.tenant_id, message_id=message.message_id,
-        raw_text=message.text_content, media_path=message.media_url)
+        raw_text=message.text_content, media_path=message.media_url,
+        media_bytes=media_bytes, mime_type=(message.media_mime_type or "").split(";")[0].strip().lower() or None)
     if result.input_metadata.is_duplicate:
         return result, OutboundMessage(recipient_phone=message.sender_phone,
                                        text_content="Message already received. Duplicate ignored.")
