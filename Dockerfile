@@ -35,6 +35,10 @@ COPY webhook-service/ ./webhook-service/
 COPY agent-orchestrator/ ./agent-orchestrator/
 COPY start.sh ./start.sh
 
+# Create Python module symlinks for hyphenated directory names
+RUN ln -s /app/agent-orchestrator /app/agent_orchestrator && \
+    ln -s /app/webhook-service /app/webhook_service
+
 # Cloud Run requires the app to listen on $PORT (default 8080)
 ENV PORT=8080
 ENV HOST=0.0.0.0
