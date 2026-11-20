@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from config import settings
 from inventory.inventory_service import InventoryService
 from inventory.inventory_analytics import InventoryAnalytics
+from parties import MerchantService, PartyService
 from models.canonical import CanonicalButton, ChannelType, InboundMessage, MessageType, OutboundMessage
 from models.firestore_schema import (
     InventoryItem,
@@ -58,6 +59,16 @@ class AgentOrchestrator:
             inventory_store=self.inventory,
             movements_store=self.movements,
             transactions_store=self.transactions,
+        )
+        self.party_service = PartyService(
+            parties_store=self.parties,
+            merchants_store=self.merchants,
+            transactions_store=self.transactions,
+        )
+        self.merchant_service = MerchantService(
+            merchants_store=self.merchants,
+            parties_store=self.parties,
+            inventory_store=self.inventory,
         )
 
         self._seed_default_tenant()
@@ -169,8 +180,10 @@ class AgentOrchestrator:
         tenant_id = message.tenant_id
         recipient_phone = message.sender_phone
 
-        if action_id.startswith("CONFIRM_TXN_"):
-            txn_id = action_id[len("CONFIRM_TXN_"):]
+        is_new_party_confirm = action_id.startswith("CONFIRM_NEW_PARTY_TXN_")
+        if action_id.startswith("CONFIRM_TXN_") or is_new_party_confirm:
+            prefix = "CONFIRM_NEW_PARTY_TXN_" if is_new_party_confirm else "CONFIRM_TXN_"
+            txn_id = action_id[len(prefix):]
             txn = self.transactions.get(txn_id)
             if not txn:
                 return OutboundMessage(
@@ -187,6 +200,18 @@ class AgentOrchestrator:
                     message_type=MessageType.TEXT,
                     text_content=f"ℹ️ Transaction `{txn_id}` is already confirmed and committed.",
                 )
+
+            # Auto-onboard party if unknown or missing from party master
+            new_party_msg = ""
+            if txn.party_name and txn.party_name not in ("Counterparty", "Internal Workshop", "Internal Stock Adjustment", "Catalog Administration"):
+                if not txn.party_id or txn.party_id not in self.parties.get(tenant_id, {}):
+                    party, _ = self.party_service.create_or_update_party(
+                        merchant_id=tenant_id,
+                        display_name=txn.party_name,
+                    )
+                    txn.party_id = party.party_id
+                    txn.party_name = party.display_name
+                    new_party_msg = f"\n👤 *New Customer Onboarded:* {party.display_name} (`{party.party_id}`)"
 
             # Atomically commit ledger mutation
             self._commit_ledger_transaction(txn)
@@ -211,7 +236,8 @@ class AgentOrchestrator:
                 f"💰 *Total Amount:* ₹{txn.total_amount:,.2f}\n"
                 f"💵 *Settled:* ₹{(txn.total_amount - udhaar_amount):,.2f}\n"
                 f"⏳ *Udhaar Added:* ₹{udhaar_amount:,.2f}"
-                f"{party_balance_str}\n"
+                f"{party_balance_str}"
+                f"{new_party_msg}\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"Ledger & stock balances updated atomically. Digital receipt generated."
             )
@@ -259,12 +285,35 @@ class AgentOrchestrator:
         if not t:
             return None
 
-        # Action commands (Inventory Setup, Logging, Adjustments, Sales) must NOT be intercepted as read queries
+        # 0a. MSME Business Profile Query (Read-Only)
+        if any(w in t for w in ("business profile", "mera profile", "profile dikhao", "account profile", "account details", "account status", "profile check", "check my account", "meri dukaan", "meri dukan")):
+            prof = self.merchant_service.get_merchant_profile(tenant_id)
+            return OutboundMessage(
+                recipient_phone=recipient_phone,
+                channel=ChannelType.META_WHATSAPP,
+                message_type=MessageType.TEXT,
+                text_content=prof["formatted_text"],
+            )
+
+        # 0b. Customer / Party List Query (Read-Only)
+        if any(w in t for w in ("customer list", "customers list", "all customers", "sabhi grahak", "grahak soochi", "grahak suchi", "parties list", "parties", "counterparties")):
+            plist = self.party_service.list_parties(tenant_id)
+            return OutboundMessage(
+                recipient_phone=recipient_phone,
+                channel=ChannelType.META_WHATSAPP,
+                message_type=MessageType.TEXT,
+                text_content=plist["formatted_text"],
+            )
+
+        # Action commands (Inventory Setup, Logging, Adjustments, Sales, Customer/MSME Onboarding) must NOT be intercepted as read queries
         action_prefixes = (
             "add item", "add sku", "naya item", "naya maal", "item add", "kotha saraku", "nayi item",
             "bechi", "becha", "sold", "diya", "kharida", "purchase",
-            "banayi", "manufactured", "likh lo", "likho", "record",
-            "kharab", "damage", "wastage"
+            "banayi", "banaya", "manufactured", "likh lo", "likho", "record",
+            "kharab", "damage", "wastage",
+            "add customer", "naya customer", "naya grahak", "customer add", "grahak add", "kotha customer", "khata kholo",
+            "setup business", "register business", "business setup", "mera business setup",
+            "update upi", "change upi", "update address", "address update", "set language", "credit threshold", "credit limit threshold"
         )
         if any(w in t for w in action_prefixes):
             return None
@@ -274,6 +323,14 @@ class AgentOrchestrator:
             help_text = (
                 "🙏 *नमस्ते! Welcome to Clandexis (Invisible ERP)*\n"
                 "Aap seedhe vernacular WhatsApp voice ya text me likhein:\n\n"
+                "📌 *MSME Setup & Profile:*\n"
+                "• _\"Setup business Sri Balaji Textiles, owner Rajesh, UPI balaji@upi\"_\n"
+                "• _\"Mera business profile dikhao\"_\n"
+                "• _\"Update UPI to rajesh@icici\"_\n\n"
+                "📌 *Customer Onboarding & Khata:*\n"
+                "• _\"Naya customer add karo: Gupta Stores, phone 9811223344, credit limit 20000\"_\n"
+                "• _\"Customer list dikhao\"_\n"
+                "• _\"Gupta Stores ka khata dikhao\"_\n\n"
                 "📌 *Inventory Setup:*\n"
                 "• _\"Naya item add karo Silk Saree 50 pieces @ 1200 reorder 10\"_\n\n"
                 "📌 *Daily Production:*\n"
@@ -287,8 +344,6 @@ class AgentOrchestrator:
                 "• _\"Kaun sa maal khatam hone wala hai?\"_ (Low stock alert)\n"
                 "• _\"Aaj kitna maal bana aur kitna bika?\"_ (Production vs Sales)\n"
                 "• _\"Aaj kitna maal bana?\"_ (Production summary)\n\n"
-                "📌 *Party Balance:*\n"
-                "• _\"Ramesh ka udhaar kitna hai?\"_\n\n"
                 "📌 *Daily Summary:*\n"
                 "• _\"Aaj ki bikri ka summary do\"_"
             )
@@ -297,6 +352,26 @@ class AgentOrchestrator:
                 channel=ChannelType.META_WHATSAPP,
                 message_type=MessageType.TEXT,
                 text_content=help_text,
+            )
+
+        # 1b. MSME Business Profile Query
+        if any(w in t for w in ("business profile", "mera profile", "account profile", "account details", "account status", "my business", "profile check", "check my account", "meri dukaan", "meri dukan")):
+            prof = self.merchant_service.get_merchant_profile(tenant_id)
+            return OutboundMessage(
+                recipient_phone=recipient_phone,
+                channel=ChannelType.META_WHATSAPP,
+                message_type=MessageType.TEXT,
+                text_content=prof["formatted_text"],
+            )
+
+        # 1c. Customer / Party List Query
+        if any(w in t for w in ("customer list", "customers list", "all customers", "sabhi grahak", "grahak soochi", "grahak suchi", "parties list", "parties", "counterparties")):
+            plist = self.party_service.list_parties(tenant_id)
+            return OutboundMessage(
+                recipient_phone=recipient_phone,
+                channel=ChannelType.META_WHATSAPP,
+                message_type=MessageType.TEXT,
+                text_content=plist["formatted_text"],
             )
 
         # 2. Production vs. Sales Comparison Query (FR-01.4)
@@ -344,8 +419,11 @@ class AgentOrchestrator:
         # If text indicates transaction recording, do not treat as read-only query
         txn_action_words = (
             "bechi", "becha", "sold", "diya", "kharida", "purchase",
-            "banayi", "manufactured", "likh lo", "likho", "record",
-            "add item", "naya item", "add sku", "kharab", "damage", "wastage"
+            "banayi", "banaya", "manufactured", "likh lo", "likho", "record",
+            "add item", "naya item", "add sku", "kharab", "damage", "wastage",
+            "add customer", "naya customer", "naya grahak", "customer add", "grahak add", "kotha customer", "khata kholo",
+            "setup business", "mera business", "register business", "business setup",
+            "update upi", "change upi", "update address", "address update", "set language", "credit threshold"
         )
         if any(w in t for w in txn_action_words):
             return None
@@ -362,36 +440,23 @@ class AgentOrchestrator:
                 text_content=status_data["formatted_text"],
             )
 
-        # 3. Party Udhaar Query (must be a query, not a sale transaction)
-        is_query_phrase = any(q in t for q in ("kitna", "kitne", "batao", "dikhao", "check", "kya", "list", "status")) or t in ("udhaar", "hisaab", "khata", "balance")
-        if is_query_phrase and any(w in t for w in ("udhaar", "hisaab", "khata", "balance", "baaki")):
-            parties = self.parties.get(tenant_id, {})
-            # Look for specific party mention
-            matched_party = None
-            for p in parties.values():
-                if p.display_name.lower() in t or any(a in t for a in p.aliases):
-                    matched_party = p
-                    break
-
+        # 7. Party Udhaar / Customer Statement Query (FR-04.1)
+        is_query_phrase = any(q in t for q in ("kitna", "kitne", "batao", "dikhao", "check", "kya", "list", "status", "statement")) or t in ("udhaar", "hisaab", "hisab", "khata", "balance")
+        if is_query_phrase and any(w in t for w in ("udhaar", "hisaab", "hisab", "khata", "balance", "baaki", "statement")):
+            matched_party, conf = self.party_service.resolve_party(tenant_id, t)
             if matched_party:
-                msg = (
-                    f"📒 *Udhaar Ledger (उधार खाता)*\n"
-                    f"━━━━━━━━━━━━━━━━━━━\n"
-                    f"👤 *Party:* {matched_party.display_name}\n"
-                    f"📞 *Phone:* {matched_party.phone or 'N/A'}\n"
-                    f"💰 *Current Udhaar Balance:* ₹{matched_party.current_udhaar_balance:,.2f}\n"
-                    f"💳 *Credit Limit:* ₹{matched_party.credit_limit:,.2f}\n"
-                    f"━━━━━━━━━━━━━━━━━━━"
-                )
+                stmt = self.party_service.get_party_statement(tenant_id, matched_party.party_id)
+                msg = stmt["formatted_text"]
             else:
-                lines = ["📒 *All Outstanding Udhaar Balances (उधार सूचि)*\n━━━━━━━━━━━━━━━━━━━"]
-                total_udhaar = 0.0
-                for p in parties.values():
-                    lines.append(f"• *{p.display_name}:* ₹{p.current_udhaar_balance:,.2f}")
-                    total_udhaar += p.current_udhaar_balance
-                lines.append("━━━━━━━━━━━━━━━━━━━")
-                lines.append(f"💰 *Total Receivables:* ₹{total_udhaar:,.2f}")
-                msg = "\n".join(lines)
+                plist = self.party_service.list_parties(tenant_id)
+                msg = plist["formatted_text"]
+
+            return OutboundMessage(
+                recipient_phone=recipient_phone,
+                channel=ChannelType.META_WHATSAPP,
+                message_type=MessageType.TEXT,
+                text_content=msg,
+            )
 
             return OutboundMessage(
                 recipient_phone=recipient_phone,
@@ -437,11 +502,120 @@ class AgentOrchestrator:
         """
         tenant_id = message.tenant_id
         recipient_phone = message.sender_phone
+        t = text.lower().strip()
 
         # 1. Vernacular Entity Extraction
         intent, party_name, line_items, payments, total_amount, confidence_score = (
             self._extract_entities_from_text(text, tenant_id)
         )
+
+        # Handle Immediate Onboarding Intents
+        if intent == TransactionIntent.CUSTOMER_ONBOARDING:
+            phone_m = re.search(r"(\+?91\d{10}|\b\d{10}\b)", text)
+            phone = phone_m.group(1) if phone_m else None
+
+            limit_m = re.search(r"(?:limit|seema|sima)\s*(?:rs\.?|₹)?\s*(\d+(?:\.\d+)?)", text, re.IGNORECASE)
+            credit_limit = float(limit_m.group(1)) if limit_m else 50000.0
+
+            bal_m = re.search(r"(?:opening|initial|purana udhaar|balance)\s*(?:rs\.?|₹)?\s*(\d+(?:\.\d+)?)", text, re.IGNORECASE)
+            opening_balance = float(bal_m.group(1)) if bal_m else 0.0
+
+            clean_name = text
+            for phrase in ("naya customer add karo", "naya customer", "add customer", "naya grahak add karo", "naya grahak", "customer add karo", "customer add", "grahak add", "kotha customer", "khata kholo"):
+                clean_name = re.sub(phrase, "", clean_name, flags=re.IGNORECASE)
+            if phone:
+                clean_name = clean_name.replace(phone, "")
+            clean_name = re.sub(r"(?:phone|mobile|ph|contact|no|number)\b", "", clean_name, flags=re.IGNORECASE)
+            clean_name = re.sub(r"(?:credit limit|limit|seema|sima)\s*(?:rs\.?|₹)?\s*\d+(?:\.\d+)?", "", clean_name, flags=re.IGNORECASE)
+            clean_name = re.sub(r"(?:opening|initial|purana udhaar|opening balance|balance)\s*(?:rs\.?|₹)?\s*\d+(?:\.\d+)?", "", clean_name, flags=re.IGNORECASE)
+            clean_name = re.sub(r"(?:udhaar|credit)\b", "", clean_name, flags=re.IGNORECASE)
+            clean_name = re.sub(r"[,:\-_]", " ", clean_name)
+            clean_name = re.sub(r"\s+", " ", clean_name).strip()
+            display_name = clean_name.title() if clean_name else "New Customer"
+
+            party, msg = self.party_service.create_or_update_party(
+                merchant_id=tenant_id,
+                display_name=display_name,
+                phone=phone,
+                credit_limit=credit_limit,
+                opening_udhaar_balance=opening_balance,
+            )
+            return OutboundMessage(
+                recipient_phone=recipient_phone,
+                channel=ChannelType.META_WHATSAPP,
+                message_type=MessageType.TEXT,
+                text_content=msg,
+            )
+
+        if intent == TransactionIntent.MERCHANT_SETUP:
+            upi_match = re.search(r"([a-zA-Z0-9.\-_]+@[a-zA-Z0-9]+)", text)
+            upi_vpa = upi_match.group(1) if upi_match else None
+
+            gstin_match = re.search(r"\b([0-9]{2}[a-zA-Z]{5}[0-9]{4}[a-zA-Z]{1}[1-9a-zA-Z]{1}z[0-9a-zA-Z]{1})\b", text, re.IGNORECASE)
+            gstin = gstin_match.group(1).upper() if gstin_match else None
+
+            owner_match = re.search(r"(?:owner|proprietor|malik)\s*(?:is|name|:)?\s*([a-zA-Z\s]+?)(?:,|$|upi|gstin|address|phone)", text, re.IGNORECASE)
+            owner_name = owner_match.group(1).strip().title() if owner_match else "Merchant Owner"
+
+            bus_match = re.search(r"(?:business|dukaan|dukan|firm|company|store)\s*(?:name|is|:)?\s*([a-zA-Z0-9\s]+?)(?:,|$|owner|proprietor|malik|upi|gstin|address)", text, re.IGNORECASE)
+            if bus_match:
+                business_name = bus_match.group(1).strip().title()
+            else:
+                clean_name = text
+                for phrase in ("setup business", "register business", "mera business", "business setup"):
+                    clean_name = re.sub(phrase, "", clean_name, flags=re.IGNORECASE)
+                if upi_vpa:
+                    clean_name = clean_name.replace(upi_vpa, "")
+                if gstin:
+                    clean_name = clean_name.replace(gstin, "")
+                clean_name = re.sub(r"(?:owner|proprietor|malik)\s*[a-zA-Z\s]+", "", clean_name, flags=re.IGNORECASE)
+                clean_name = re.sub(r"[,:\-_]", " ", clean_name).strip()
+                business_name = clean_name.title() if clean_name else "MSME Enterprise"
+
+            merchant, msg = self.merchant_service.setup_or_update_merchant(
+                merchant_id=tenant_id,
+                business_name=business_name,
+                owner_name=owner_name,
+                gstin=gstin,
+                upi_vpa=upi_vpa,
+                preferred_lang="hi",
+            )
+            return OutboundMessage(
+                recipient_phone=recipient_phone,
+                channel=ChannelType.META_WHATSAPP,
+                message_type=MessageType.TEXT,
+                text_content=msg,
+            )
+
+        if intent == TransactionIntent.MERCHANT_UPDATE:
+            field = "business_name"
+            val = ""
+            if "upi" in t:
+                field = "upi_vpa"
+                upi_m = re.search(r"([a-zA-Z0-9.\-_]+@[a-zA-Z0-9]+)", text)
+                val = upi_m.group(1) if upi_m else "merchant@upi"
+            elif any(w in t for w in ("address", "pata", "premises")):
+                field = "business_address"
+                val = re.sub(r".*?(?:address|pata)\s*(?:to|is|karke|:)?\s*", "", text, flags=re.IGNORECASE).strip().title()
+            elif any(w in t for w in ("language", "bhasha")):
+                field = "preferred_lang"
+                val = "te" if "telugu" in t else ("en" if "english" in t else "hi")
+            elif any(w in t for w in ("credit threshold", "safety limit", "threshold")):
+                field = "high_credit_threshold"
+                amt_m = re.search(r"(\d+(?:\.\d+)?)", text)
+                val = float(amt_m.group(1)) if amt_m else 5000.0
+
+            merchant, msg = self.merchant_service.update_merchant_field(
+                merchant_id=tenant_id,
+                field_name=field,
+                value=val,
+            )
+            return OutboundMessage(
+                recipient_phone=recipient_phone,
+                channel=ChannelType.META_WHATSAPP,
+                message_type=MessageType.TEXT,
+                text_content=msg,
+            )
 
         # Resolve party ID if exists
         party_id = None
@@ -454,6 +628,12 @@ class AgentOrchestrator:
                     party_name = party.display_name
                     break
 
+        # Check unknown party safety trigger
+        unknown_party_flag = False
+        if party_name and not party_id and party_name not in ("Counterparty", "Internal Workshop", "Internal Stock Adjustment", "Catalog Administration"):
+            unknown_party_flag = True
+            confidence_score = min(confidence_score, 0.70)
+
         # 2. Invariant Math Validation & Safety Gate Check
         is_math_valid, gate_reason, requires_safety_gate = validate_split_math(
             total_amount=total_amount,
@@ -461,6 +641,10 @@ class AgentOrchestrator:
             payments=payments,
             confidence_score=confidence_score,
         )
+
+        if unknown_party_flag:
+            requires_safety_gate = True
+            gate_reason = f"New Customer '{party_name}' not in Khata. Confirm to onboard customer and commit transaction."
 
         if not is_math_valid:
             return OutboundMessage(
@@ -497,7 +681,7 @@ class AgentOrchestrator:
         )
         self.transactions[txn_id] = txn
 
-        # 4. Human-in-the-Loop Safety Gate Branch: High credit or low confidence
+        # 4. Human-in-the-Loop Safety Gate Branch: High credit or low confidence or unknown customer
         if requires_safety_gate:
             udhaar_val = sum(p.amount for p in payments if p.method == PaymentMethod.UDHAAR_CREDIT)
             cash_val = sum(p.amount for p in payments if p.method != PaymentMethod.UDHAAR_CREDIT)
@@ -514,8 +698,9 @@ class AgentOrchestrator:
                 f"Do you want to confirm this transaction?"
             )
 
+            confirm_btn_id = f"CONFIRM_NEW_PARTY_TXN_{txn_id}" if unknown_party_flag else f"CONFIRM_TXN_{txn_id}"
             buttons = [
-                CanonicalButton(id=f"CONFIRM_TXN_{txn_id}", title="✅ Confirm (हाँ)"),
+                CanonicalButton(id=confirm_btn_id, title="✅ Confirm (हाँ)"),
                 CanonicalButton(id=f"CANCEL_TXN_{txn_id}", title="❌ Cancel (रद्द)"),
             ]
 
@@ -611,12 +796,39 @@ class AgentOrchestrator:
         t = text.lower()
         confidence = 0.95
 
-        # Identify party
-        party_name = None
-        for p in self.parties.get(tenant_id, {}).values():
-            if p.display_name.lower() in t or any(a in t for a in p.aliases):
-                party_name = p.display_name
-                break
+        # 0a. Check Customer Onboarding Intent
+        if any(w in t for w in ("add customer", "naya customer", "naya grahak", "customer add", "grahak add", "kotha customer", "khata kholo")):
+            return TransactionIntent.CUSTOMER_ONBOARDING, None, [], [], 0.0, 1.0
+
+        # 0b. Check Merchant Setup Intent
+        if any(w in t for w in ("setup business", "register business", "mera business", "business setup")):
+            return TransactionIntent.MERCHANT_SETUP, None, [], [], 0.0, 1.0
+
+        # 0c. Check Merchant Update Intent
+        if any(w in t for w in ("update upi", "change upi", "update address", "address update", "set language", "credit threshold", "credit limit threshold")):
+            return TransactionIntent.MERCHANT_UPDATE, None, [], [], 0.0, 1.0
+
+        # Identify party using party_service fuzzy matcher
+        matched_party, party_conf = self.party_service.resolve_party(tenant_id, t)
+        party_name = matched_party.display_name if matched_party else None
+
+        if not party_name and any(w in t for w in ("ko", "to")):
+            cand = None
+            if " to " in t or t.startswith("to "):
+                to_m = re.search(r"\bto\s+([a-zA-Z\s]+?)(?:\s+for|\s+rs|\s+₹|\s*\d|\s+ka|\s+ki|$)", t)
+                if to_m:
+                    cand = to_m.group(1).strip()
+            elif " ko " in t or t.startswith("ko "):
+                ko_m = re.search(r"(?:^|sold\s+|becha\s+|bechi\s+)?([a-zA-Z\s]+?)\s+ko\b", t)
+                if ko_m:
+                    cand = ko_m.group(1).strip()
+
+            if cand:
+                filter_words = {"aaj", "kal", "batch", "workshop", "him", "her", "them", "cash", "online", "pieces", "meters", "kg", "boxes", "cotton", "shirt", "kurta"}
+                cand_clean = " ".join([w for w in cand.split() if w not in filter_words])
+                if cand_clean and len(cand_clean) > 2:
+                    party_name = cand_clean.title()
+                    confidence = 0.70
 
         # 1. Check Inventory Catalog Setup Intent (FR-01)
         if any(w in t for w in ("add item", "add sku", "naya item", "naya maal", "item add", "kotha saraku", "nayi item")):
@@ -857,15 +1069,13 @@ class AgentOrchestrator:
 
     def _init_tenant(self, tenant_id: str, sender_name: Optional[str] = None):
         """Initializes a new merchant tenant with standard defaults."""
-        self.merchants[tenant_id] = Merchant(
+        self.merchant_service.setup_or_update_merchant(
             merchant_id=tenant_id,
             business_name=f"{sender_name or 'MSME'} Enterprises",
             owner_name=sender_name or "Merchant Owner",
             preferred_lang="hi",
             high_credit_threshold=settings.HIGH_CREDIT_THRESHOLD,
             whatsapp_phone_number_id=settings.META_PHONE_NUMBER_ID,
-            whatsapp_verified_at=datetime.now(timezone.utc),
         )
-        self.parties[tenant_id] = {}
-        self.inventory[tenant_id] = {}
-        self.movements[tenant_id] = []
+        if tenant_id not in self.movements:
+            self.movements[tenant_id] = []

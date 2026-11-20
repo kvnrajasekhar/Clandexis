@@ -32,6 +32,7 @@ COPY --from=builder /install /usr/local
 COPY config.py ./config.py
 COPY models/ ./models/
 COPY inventory/ ./inventory/
+COPY parties/ ./parties/
 COPY webhook-service/ ./webhook-service/
 COPY agent-orchestrator/ ./agent-orchestrator/
 COPY start.sh ./start.sh
