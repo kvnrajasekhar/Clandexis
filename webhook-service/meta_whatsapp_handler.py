@@ -5,7 +5,7 @@ media downloading (voice notes & kacha bills), and outbound message dispatching.
 """
 
 import logging
-import os
+import re
 from typing import Any, Dict, List, Optional
 import httpx
 
@@ -29,6 +29,11 @@ from models.whatsapp_meta import (
 )
 
 logger = logging.getLogger("meta-whatsapp-handler")
+
+def resolve_sender(sender_phone: str) -> Optional[str]:
+    from app.services.whatsapp_identity import resolve_phone
+    return resolve_phone(sender_phone)
+
 
 class MetaWhatsAppService:
     def __init__(
@@ -59,13 +64,13 @@ class MetaWhatsAppService:
         try:
             payload = MetaWebhookPayload.model_validate(raw_data)
         except Exception as e:
-            logger.error(f"Failed to validate Meta webhook schema: {e}")
+            logger.error("Invalid Meta webhook schema")
             return inbound_messages
 
         for entry in payload.entry:
             for change in entry.changes:
                 value = change.value
-                if not value.messages:
+                if not value.messages or not self.phone_number_id or value.metadata.phone_number_id != self.phone_number_id:
                     # Ignore status delivery receipts or empty message batches
                     continue
 
@@ -73,16 +78,31 @@ class MetaWhatsAppService:
 
                 for msg in value.messages:
                     sender_wa_id = msg.from_user
-                    sender_phone = f"+{sender_wa_id}" if not sender_wa_id.startswith("+") else sender_wa_id
+                    from app.services.whatsapp_identity import normalize_phone
+                    try:
+                        sender_phone = normalize_phone(sender_wa_id)
+                    except ValueError:
+                        continue
+                    if sender_phone == normalize_phone(value.metadata.display_phone_number):
+                        continue
                     sender_name = contact_map.get(sender_wa_id)
-                    tenant_id = sender_phone  # By default, MSME merchant is identified by E.164 phone
+                    if not re.fullmatch(r"\+[1-9][0-9]{1,14}", sender_phone):
+                        continue
+                    tenant_id = resolve_sender(sender_phone)
+                    if not tenant_id:
+                        continue
 
                     canonical_msg = self._normalize_message(
                         msg=msg,
                         tenant_id=tenant_id,
                         sender_phone=sender_phone,
                         sender_name=sender_name,
-                        raw_payload=raw_data,
+                        raw_payload={"object": raw_data.get("object"), "entry": [{
+                            "id": entry.id, "changes": [{"field": change.field, "value": {
+                                "metadata": value.metadata.model_dump(mode="json"),
+                                "messages": [msg.model_dump(mode="json", by_alias=True, exclude_none=True)]
+                            }}]
+                        }]},
                     )
                     if canonical_msg:
                         inbound_messages.append(canonical_msg)
@@ -173,7 +193,7 @@ class MetaWhatsAppService:
             data = resp.json()
             return data.get("url")
         except Exception as e:
-            logger.error(f"Error fetching media URL for {media_id}: {e}")
+            logger.error("Media URL retrieval failed (%s)", type(e).__name__)
             return None
 
     async def download_media_bytes(self, media_id: str) -> Optional[bytes]:
@@ -186,11 +206,17 @@ class MetaWhatsAppService:
 
         headers = {"Authorization": f"Bearer {self.token}"}
         try:
-            resp = await self.http_client.get(download_url, headers=headers)
-            resp.raise_for_status()
-            return resp.content
+            async with self.http_client.stream("GET", download_url, headers=headers) as resp:
+                resp.raise_for_status()
+                data = bytearray()
+                max_media_bytes = 16 * 1024 * 1024
+                async for chunk in resp.aiter_bytes():
+                    if len(data) + len(chunk) > max_media_bytes:
+                        return None
+                    data.extend(chunk)
+                return bytes(data)
         except Exception as e:
-            logger.error(f"Error downloading media content from {download_url}: {e}")
+            logger.error("Media download failed (%s)", type(e).__name__)
             return None
 
     # ==========================================================================
@@ -334,7 +360,7 @@ class MetaWhatsAppService:
             resp = await self.http_client.post(endpoint, json=body, headers=headers)
             return resp.status_code == 200
         except Exception as e:
-            logger.warning(f"Could not mark message {message_id} as read: {e}")
+            logger.warning("Read receipt failed (%s)", type(e).__name__)
             return False
 
     async def _post_message(self, payload: MetaSendMessageRequest) -> Optional[MetaSendResponse]:
@@ -353,9 +379,9 @@ class MetaWhatsAppService:
                 headers=headers,
             )
             if resp.status_code >= 400:
-                logger.error(f"Meta Graph API error [{resp.status_code}]: {resp.text}")
+                logger.error("Meta Graph API error (HTTP %s)", resp.status_code)
                 return None
             return MetaSendResponse.model_validate(resp.json())
         except Exception as e:
-            logger.error(f"Failed to post outbound message to Meta WhatsApp: {e}")
+            logger.error("Meta dispatch failed (%s)", type(e).__name__)
             return None

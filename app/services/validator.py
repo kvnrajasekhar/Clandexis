@@ -1,7 +1,16 @@
 import re
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import List, Optional
 from app.schemas.transaction import TransactionCandidate, ExtractionResponse, TransactionType
+
+_CENT = Decimal("0.01")
+
+
+def _m(value) -> Decimal:
+    """Money -> exact 2-dp Decimal. Float noise from upstream sums (50.0 + 49.99 =
+    99.99000000000001) is removed here, before any comparison, with ROUND_HALF_UP."""
+    return Decimal(str(value)).quantize(_CENT, rounding=ROUND_HALF_UP)
+
 
 class BusinessValidator:
     """
@@ -34,7 +43,7 @@ class BusinessValidator:
         # --- Rule 2: Derive unit_price_source provenance & validate line items ---
         for item in tx.items:
             if item.quantity is not None and item.line_total is not None and item.quantity > 0:
-                calc_unit = Decimal(str(item.line_total)) / Decimal(str(item.quantity))
+                calc_unit = _m(item.line_total) / Decimal(str(item.quantity))
                 if item.unit_price is None:
                     item.unit_price = float(calc_unit)
                     item.unit_price_source = "derived"
@@ -49,7 +58,7 @@ class BusinessValidator:
         # --- Rule 3: Reconcile Line Items Sum vs Subtotal / Total ---
         if len(tx.items) > 0:
             items_total = sum(
-                (Decimal(str(i.line_total)) for i in tx.items if i.line_total is not None),
+                (_m(i.line_total) for i in tx.items if i.line_total is not None),
                 Decimal("0")
             )
             # If no line_total, use qty * unit_price
@@ -61,8 +70,8 @@ class BusinessValidator:
                 )
 
             if items_total > Decimal("0") and tx.total_amount is not None:
-                total_dec = Decimal(str(tx.total_amount))
-                subtotal_dec = Decimal(str(tx.subtotal)) if tx.subtotal is not None else None
+                total_dec = _m(tx.total_amount)
+                subtotal_dec = _m(tx.subtotal) if tx.subtotal is not None else None
                 # If subtotal missing, compare items_total to total_amount (if no tax/discount)
                 if subtotal_dec is None and (tx.tax_amount is None or tx.tax_amount == 0) and (tx.discount_amount is None or tx.discount_amount == 0):
                     if abs(items_total - total_dec) > Decimal("0.01"):
@@ -78,11 +87,11 @@ class BusinessValidator:
 
         # --- Rule 4: Subtotal + Tax - Discount against Total ---
         if tx.total_amount is not None and tx.subtotal is not None:
-            sub_dec = Decimal(str(tx.subtotal))
-            tax_dec = Decimal(str(tx.tax_amount)) if tx.tax_amount is not None else Decimal("0")
-            disc_dec = Decimal(str(tx.discount_amount)) if tx.discount_amount is not None else Decimal("0")
+            sub_dec = _m(tx.subtotal)
+            tax_dec = _m(tx.tax_amount) if tx.tax_amount is not None else Decimal("0")
+            disc_dec = _m(tx.discount_amount) if tx.discount_amount is not None else Decimal("0")
             expected_tot = sub_dec + tax_dec - disc_dec
-            actual_tot = Decimal(str(tx.total_amount))
+            actual_tot = _m(tx.total_amount)
             if abs(expected_tot - actual_tot) > Decimal("0.01"):
                 warnings.append(
                     f"Subtotal ({sub_dec}) + Tax ({tax_dec}) - Discount ({disc_dec}) = {expected_tot}, but total_amount is {actual_tot}."
@@ -90,17 +99,17 @@ class BusinessValidator:
                 is_rejected = True
 
         # --- Rule 5: Payments & Overpayment Check ---
-        paid_from_payments = sum((Decimal(str(p.amount)) for p in tx.payments), Decimal("0"))
+        paid_from_payments = sum((_m(p.amount) for p in tx.payments), Decimal("0"))
         
         # Check cash_amount + online_amount match payments
         if tx.cash_amount is not None or tx.online_amount is not None:
-            calc_split = (Decimal(str(tx.cash_amount or 0)) + Decimal(str(tx.online_amount or 0)))
+            calc_split = (_m(tx.cash_amount or 0) + _m(tx.online_amount or 0))
             if abs(calc_split - paid_from_payments) > Decimal("0.01") and len(tx.payments) > 0:
                 warnings.append(f"Split payments sum ({calc_split}) differs from payments list sum ({paid_from_payments}).")
                 requires_review = True
 
         if tx.amount_paid is not None:
-            if abs(Decimal(str(tx.amount_paid)) - paid_from_payments) > Decimal("0.01") and len(tx.payments) > 0:
+            if abs(_m(tx.amount_paid) - paid_from_payments) > Decimal("0.01") and len(tx.payments) > 0:
                 warnings.append(f"amount_paid ({tx.amount_paid}) differs from sum of payments ({paid_from_payments}).")
                 requires_review = True
         elif len(tx.payments) > 0:
@@ -108,13 +117,21 @@ class BusinessValidator:
 
         # Check for OVERPAYMENT: total_amount < amount_paid
         if tx.total_amount is not None and tx.amount_paid is not None:
-            tot_dec = Decimal(str(tx.total_amount))
-            paid_dec = Decimal(str(tx.amount_paid))
+            tot_dec = _m(tx.total_amount)
+            paid_dec = _m(tx.amount_paid)
             if paid_dec > tot_dec:
                 warnings.append(
                     f"Overpayment / Inconsistent payment total: Paid ({paid_dec}) exceeds Total Amount ({tot_dec})."
                 )
                 is_rejected = True
+
+        if tx.transaction_type in [TransactionType.SALE, TransactionType.PURCHASE]:
+            if not tx.items or any(i.unit_price is None for i in tx.items):
+                tx.needs_clarification = True
+                requires_review = True
+                warnings.append("Missing item price. Merchant clarification required.")
+                if not tx.clarification_question:
+                    tx.clarification_question = "What is the item price and how was payment settled?"
 
         # --- Rule 6: Missing payment info vs Assumed Credit Check ---
         # If sale/purchase has total_amount but NO payments mentioned AND no explicit credit stated:
@@ -138,13 +155,13 @@ class BusinessValidator:
             buyer_lower = (tx.buyer_name or "").lower()
             supp_lower = (tx.supplier_name or "").lower()
 
-            if m_lower in buyer_lower or buyer_lower in m_lower:
+            if buyer_lower and (m_lower in buyer_lower or buyer_lower in m_lower):
                 # Logged in merchant is the BUYER, so from their perspective it's a PURCHASE
                 if tx.transaction_type == TransactionType.SALE:
                     warnings.append(f"Merchant '{current_merchant_id_or_name}' identified as Buyer. Adjusted transaction_type from 'sale' to 'purchase'.")
                     tx.transaction_type = TransactionType.PURCHASE
                     requires_review = True
-            elif m_lower in supp_lower or supp_lower in m_lower:
+            elif supp_lower and (m_lower in supp_lower or supp_lower in m_lower):
                 # Logged in merchant is the SUPPLIER, so it is a SALE
                 if tx.transaction_type == TransactionType.PURCHASE:
                     warnings.append(f"Merchant '{current_merchant_id_or_name}' identified as Supplier. Adjusted transaction_type from 'purchase' to 'sale'.")
@@ -156,8 +173,8 @@ class BusinessValidator:
             match = re.search(r"(\d+(\.\d+)?)%\s*credit", terms_lower)
             if match:
                 expected_credit_pct = Decimal(match.group(1)) / Decimal("100")
-                expected_credit = Decimal(str(tx.total_amount)) * expected_credit_pct
-                actual_credit = Decimal(str(tx.credit_amount)) if tx.credit_amount is not None else Decimal("0")
+                expected_credit = _m(tx.total_amount) * expected_credit_pct
+                actual_credit = _m(tx.credit_amount) if tx.credit_amount is not None else Decimal("0")
                 if abs(actual_credit - expected_credit) > Decimal("0.01"):
                     warnings.append(
                         f"Declared '{tx.payment_terms}' implies credit of {expected_credit:.2f}, but recorded credit_amount is {actual_credit:.2f}."

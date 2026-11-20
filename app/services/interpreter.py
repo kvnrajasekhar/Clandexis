@@ -1,14 +1,28 @@
+from enum import Enum
 from pathlib import Path
 from typing import Any, List, Optional, Union
 from google.genai import types
-from app.schemas.transaction import ExtractionResponse
+from app.schemas.transaction import ExtractionResponse, TransactionCandidate
 from app.utils.client import get_genai_client
 from app.utils.media import detect_mime_type
 from app.core.config import settings
 
+class ExtractionVersion(str, Enum):
+    CURRENT = "1.1"
+
+
+class GeminiCandidate(TransactionCandidate):
+    schema_version: ExtractionVersion
+
+
+class GeminiExtraction(ExtractionResponse):
+    transactions: list[GeminiCandidate]
+
+
 SYSTEM_INSTRUCTION = """
 You are Clandexis Transaction Extractor, a multilingual information extraction system for Indian MSMEs.
 
+Set schema_version to "1.1" for each transaction.
 Your ONLY responsibility is to convert text, audio, images or PDF documents into structured transaction candidates. Never post directly to a ledger.
 
 Supported intents (transaction_type):
@@ -80,7 +94,7 @@ class InterpreterService:
         config = types.GenerateContentConfig(
             system_instruction=SYSTEM_INSTRUCTION,
             response_mime_type="application/json",
-            response_schema=ExtractionResponse,
+            response_schema=GeminiExtraction,
             temperature=0.1,
         )
 
@@ -103,4 +117,4 @@ class InterpreterService:
                 raise e
 
         raw_json_str = response.text or "{}"
-        return ExtractionResponse.model_validate_json(raw_json_str)
+        return GeminiExtraction.model_validate_json(raw_json_str)

@@ -9,12 +9,13 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi import BackgroundTasks, FastAPI, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 
 from config import settings
-from models.canonical import InboundMessage, OutboundMessage
+from models.canonical import InboundMessage, MessageType, OutboundMessage
+from app.api.v1 import api_router
 from .meta_whatsapp_handler import MetaWhatsAppService
 from .security import verify_meta_signature
 
@@ -28,7 +29,13 @@ meta_service: Optional[MetaWhatsAppService] = None
 async def lifespan(app: FastAPI):
     global meta_service
     meta_service = MetaWhatsAppService()
-    logger.info("MetaWhatsAppService initialized.")
+    try:
+        from app.services.confirmation import configure_confirmation
+        from app.services.persistence import confirmation_adapter
+        configure_confirmation(confirmation_adapter())
+        logger.info("WhatsApp transport and %s ledger adapter initialized.", settings.DATABASE_BACKEND)
+    except Exception as e:
+        logger.warning("Ledger adapter unavailable (%s)", type(e).__name__)
     yield
     if meta_service:
         await meta_service.close()
@@ -36,19 +43,26 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Clandexis Invisible ERP — Webhook Service",
-    description="WhatsApp Meta Cloud API Ingestion and Delivery Service",
-    version="1.0.0",
+    title="Clandexis Invisible ERP — Webhook & Dashboard API",
+    description="WhatsApp Meta Cloud API Ingestion, Ledger Operations & Judge Live Dashboard",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+from app.core.security import install_security, require_service
+install_security(app)
+
+# Mount all /api/v1 endpoints including dashboard & multimodal extraction
+app.include_router(api_router, prefix="/api/v1")
+
+# Mount built React Vite dashboard static assets if present
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+
+dashboard_dist = Path(__file__).resolve().parent.parent / "dashboard" / "dist"
+if dashboard_dist.exists():
+    app.mount("/dashboard", StaticFiles(directory=str(dashboard_dist), html=True), name="dashboard")
+
 
 
 # ==============================================================================
@@ -62,6 +76,7 @@ async def health_check():
         "service": "webhook-service",
         "channel": "meta_whatsapp",
         "api_version": "v21.0",
+        "database_backend": settings.DATABASE_BACKEND,
     }
 
 
@@ -81,11 +96,11 @@ async def verify_meta_webhook(
     """
     expected_verify_token = settings.META_VERIFY_TOKEN
     
-    if hub_mode == "subscribe" and hub_verify_token == expected_verify_token:
+    if expected_verify_token and hub_mode == "subscribe" and hub_verify_token == expected_verify_token:
         logger.info("Meta webhook verified successfully.")
         return PlainTextResponse(content=hub_challenge or "", status_code=200)
 
-    logger.warning(f"Meta webhook verification failed. Token received: {hub_verify_token}")
+    logger.warning("Meta webhook verification failed")
     raise HTTPException(status_code=403, detail="Verification token mismatch")
 
 
@@ -133,15 +148,38 @@ async def process_inbound_message(message: InboundMessage):
     """
     logger.info(f"Processing inbound message {message.message_id} in background pipeline...")
     try:
-        from agent_orchestrator import orchestrate_inbound_message
-        result, outbound = orchestrate_inbound_message(message)
-        logger.info(f"Orchestration completed for {message.message_id}. Status: {result.extraction.transactions[0].validation_status if result.extraction.transactions else 'N/A'}")
+        from app.services.whatsapp_conversation import process_whatsapp_message
+        media_bytes = None
+        if message.message_type in (MessageType.AUDIO, MessageType.IMAGE, MessageType.DOCUMENT):
+            if meta_service is None:
+                return
+            if message.media_id and message.media_mime_type:
+                media_bytes = await meta_service.download_media_bytes(message.media_id)
+            if not media_bytes:
+                await meta_service.dispatch_outbound(OutboundMessage(
+                    recipient_phone=message.sender_phone,
+                    text_content="Could not read the attachment. Please resend it or send the details as text."))
+                return
+        result, outbound = process_whatsapp_message(message, media_bytes=media_bytes)
+        logger.info("Orchestration completed for %s (%s)", message.message_id, type(result).__name__)
         
-        # Dispatch WhatsApp reply back to user
+        # Generate only after a successful ledger result; all side effects are
+        # outside Firestore callbacks. Invoice errors never undo the committed sale.
+        from app.services.confirmation import AuthenticatedMerchant, PostingResult
+        from app.services.posting_flow import generate_posting_document
+        document = None
+        if isinstance(result, PostingResult):
+            document = generate_posting_document(AuthenticatedMerchant(message.tenant_id), result)
+            if document["status"] != "NOT_APPLICABLE":
+                outbound.text_content += f"\nInvoice status: {document['status']}"
         if meta_service:
             await meta_service.dispatch_outbound(outbound)
+            if document and document.get("document_url"):
+                await meta_service.dispatch_outbound(OutboundMessage(
+                    recipient_phone=message.sender_phone, message_type=MessageType.DOCUMENT,
+                    document_url=document["document_url"], document_filename=document["filename"]))
     except Exception as e:
-        logger.error(f"Error in process_inbound_message: {e}", exc_info=True)
+        logger.error("Inbound processing failed (%s)", type(e).__name__)
 
 
 # ==============================================================================
@@ -149,7 +187,7 @@ async def process_inbound_message(message: InboundMessage):
 # ==============================================================================
 
 @app.post("/api/v1/send")
-async def send_outbound_message(outbound: OutboundMessage):
+async def send_outbound_message(outbound: OutboundMessage, authorized=Depends(require_service)):
     """
     Internal API for microservices (agent-orchestrator, pdf-service) to dispatch
     messages, 1-tap confirmation buttons, PDF invoices, and audio readbacks to WhatsApp.

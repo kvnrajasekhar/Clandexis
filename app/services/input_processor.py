@@ -24,6 +24,8 @@ class InputProcessor:
         raw_text: Optional[str] = None,
         media_path: Optional[Union[str, Path]] = None,
         media_bytes: Optional[bytes] = None,
+        mime_type: Optional[str] = None,
+        track_duplicates: bool = True,
     ) -> Tuple[ProcessedInputPayload, Optional[bytes], Optional[str]]:
         """
         Process incoming merchant message and return normalized payload.
@@ -32,7 +34,6 @@ class InputProcessor:
             raise ValueError("merchant_id is required.")
 
         file_bytes = media_bytes
-        mime_type = None
 
         if media_path:
             p = Path(media_path)
@@ -49,8 +50,8 @@ class InputProcessor:
             message_id=message_id,
         )
 
-        is_dup = idempotency_key in self._processed_keys
-        if not is_dup:
+        is_dup = track_duplicates and idempotency_key in self._processed_keys
+        if track_duplicates and not is_dup:
             self._processed_keys.add(idempotency_key)
 
         # Classify input media type

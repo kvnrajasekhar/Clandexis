@@ -1,10 +1,19 @@
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from app.core.config import settings
 from app.api.v1 import api_router
 
+@asynccontextmanager
+async def lifespan(app):
+    from app.services.confirmation import configure_confirmation
+    from app.services.persistence import confirmation_adapter
+    configure_confirmation(confirmation_adapter())
+    yield
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
+        lifespan=lifespan,
         title=settings.PROJECT_NAME,
         version=settings.VERSION,
         description="Multimodal Financial Extraction & Business Validation API for Indian MSMEs",
@@ -13,14 +22,8 @@ def create_app() -> FastAPI:
         redoc_url=f"{settings.API_V1_STR}/redoc",
     )
 
-    # Enable CORS for product/web/app integration
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    from app.core.security import install_security
+    install_security(app)
 
     # Health check
     @app.get("/health", tags=["Health"])

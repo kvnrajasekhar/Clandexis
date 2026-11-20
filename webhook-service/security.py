@@ -6,6 +6,7 @@ Validates HMAC-SHA256 signatures from X-Hub-Signature-256 header to guarantee au
 import hashlib
 import hmac
 import logging
+import re
 from typing import Optional
 
 logger = logging.getLogger("webhook-security")
@@ -17,18 +18,18 @@ def verify_meta_signature(payload_bytes: bytes, signature_header: Optional[str],
     Format: 'sha256=<hex_digest>'
     """
     if not app_secret:
-        logger.warning("META_APP_SECRET is not configured; skipping signature validation (dev mode only).")
-        return True
+        logger.error("META_APP_SECRET is not configured; rejecting webhook.")
+        return False
 
     if not signature_header:
         logger.error("Missing X-Hub-Signature-256 header in incoming Meta webhook.")
         return False
 
-    if not signature_header.startswith("sha256="):
-        logger.error(f"Malformed signature header format: {signature_header}")
+    if not re.fullmatch(r"sha256=[a-fA-F0-9]{64}", signature_header):
+        logger.error("Malformed signature header format")
         return False
 
-    expected_signature = signature_header.split("sha256=")[-1]
+    expected_signature = signature_header[7:].lower()
     calculated_signature = hmac.new(
         key=app_secret.encode("utf-8"),
         msg=payload_bytes,

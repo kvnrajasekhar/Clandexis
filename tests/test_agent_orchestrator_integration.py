@@ -1,55 +1,55 @@
+"""Deterministic orchestration tests; provider calls are outside this boundary."""
+from types import SimpleNamespace
 import pytest
-from models.canonical import InboundMessage, MessageType, ChannelType
-from agent_orchestrator import orchestrate_inbound_message
+from app.schemas.transaction import ProcessingResult, ProcessedInputPayload, ExtractionResponse
+from models.canonical import InboundMessage, MessageType
+from tests.confirmation_stub import LedgerStub
+from tests.test_confirmation import candidate
 
-def test_orchestrator_repayment():
-    msg = InboundMessage(
-        message_id="test_orch_001",
-        tenant_id="+919876543210",
-        sender_phone="+919876543210",
-        message_type=MessageType.TEXT,
-        text_content="Ravi gave 2000 rupees today for his previous pending balance.",
-    )
-    result, outbound = orchestrate_inbound_message(msg)
-    
-    assert len(result.extraction.transactions) > 0
-    tx = result.extraction.transactions[0]
-    assert tx.transaction_type == "payment_received"
-    assert tx.buyer_name == "Ravi"
-    assert tx.amount_paid == 2000.0
-    assert outbound.recipient_phone == "+919876543210"
-    assert "Recorded" in outbound.text_content or "Clarification" in outbound.text_content
 
-def test_orchestrator_unstated_payment_triggers_buttons():
-    """Unstated payment triggers 1-tap clarification buttons on WhatsApp"""
-    msg = InboundMessage(
-        message_id="test_orch_002",
-        tenant_id="+919876543210",
-        sender_phone="+919876543210",
-        message_type=MessageType.TEXT,
-        text_content="Sold 10 shirts to Raju for 5000 rupees.",
-    )
-    result, outbound = orchestrate_inbound_message(msg)
-    
-    tx = result.extraction.transactions[0]
-    assert tx.needs_clarification is True
-    # Dispatches interactive quick-reply buttons
-    assert outbound.buttons is not None
-    assert len(outbound.buttons) == 2
-    assert outbound.buttons[0].title == "✅ Confirm (हाँ)"
-    assert outbound.buttons[1].title == "❌ Cancel (रद्द)"
+@pytest.mark.parametrize("status", ["ACCEPTED", "NEEDS_REVIEW", "REJECTED"])
+def test_orchestrator_stages_without_claiming_commit(monkeypatch, status):
+    import agent_orchestrator.orchestrator as orchestrator
+    import app.services.confirmation as confirmation
+    ledger = LedgerStub()
+    monkeypatch.setattr(confirmation, "_service", confirmation.ConfirmationService(ledger))
+    tx = candidate(validation_status=status, needs_clarification=status == "NEEDS_REVIEW")
+    result = ProcessingResult(input_metadata=ProcessedInputPayload(
+        merchant_id="merchant", message_id="original", idempotency_key="original"),
+        extraction=ExtractionResponse(transactions=[tx]))
+    monkeypatch.setattr(orchestrator, "pipeline", SimpleNamespace(process_and_interpret=lambda **kw: result))
+    message = InboundMessage(message_id="original", tenant_id="merchant", sender_phone="merchant",
+                             message_type=MessageType.TEXT, text_content="A sale")
+    _, out = orchestrator.orchestrate_inbound_message(message)
+    assert ledger.post_count == 0
+    if status == "REJECTED":
+        assert not ledger.rows
+        assert "Transaction Rejected" in out.text_content
+    else:
+        assert len(ledger.rows) == 1
+        if status == "NEEDS_REVIEW":
+            assert not out.buttons and "Nothing posted" in out.text_content
+            return
+        persisted = next(iter(ledger.rows))
+        assert out.buttons[0].id == f"clx:v1:confirm:{persisted}"
+        assert out.buttons[1].id == f"clx:v1:cancel:{persisted}"
+        assert out.message_type == MessageType.INTERACTIVE_BUTTON
+        assert "Nothing posted yet" in out.interactive_body
+        assert "Recorded" not in out.interactive_body
 
-def test_orchestrator_inconsistent_payment_rejection():
-    """Overpayment triggers transaction rejection"""
-    msg = InboundMessage(
-        message_id="test_orch_003",
-        tenant_id="+919876543210",
-        sender_phone="+919876543210",
-        message_type=MessageType.TEXT,
-        text_content="Sold 5 bags to Suresh for 10000. Suresh paid 7000 cash and 4000 UPI.",
-    )
-    result, outbound = orchestrate_inbound_message(msg)
-    
-    tx = result.extraction.transactions[0]
-    assert tx.validation_status == "REJECTED"
-    assert "❌ *Transaction Rejected*" in outbound.text_content
+
+@pytest.mark.parametrize("intent", ["unknown", "query"])
+def test_non_financial_intents_never_stage(monkeypatch, intent):
+    import agent_orchestrator.orchestrator as orchestrator
+    import app.services.confirmation as confirmation
+    ledger = LedgerStub()
+    monkeypatch.setattr(confirmation, "_service", confirmation.ConfirmationService(ledger))
+    result = ProcessingResult(input_metadata=ProcessedInputPayload(
+        merchant_id="merchant", message_id="report", idempotency_key="report"),
+        extraction=ExtractionResponse(transactions=[candidate(transaction_type=intent)]))
+    monkeypatch.setattr(orchestrator, "pipeline", SimpleNamespace(process_and_interpret=lambda **kw: result))
+    _, out = orchestrator.orchestrate_inbound_message(InboundMessage(
+        message_id="report", tenant_id="merchant", sender_phone="merchant",
+        message_type=MessageType.TEXT, text_content="Unsupported request"))
+    assert not ledger.rows and ledger.post_count == 0
+    assert "Nothing posted" in out.text_content

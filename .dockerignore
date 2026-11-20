@@ -1,0 +1,17 @@
+.git
+.venv
+venv
+__pycache__
+.pytest_cache
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+service_account.json
+credentials.json
+dashboard/node_modules
+dashboard/dist
+output
+tmp
+*.log

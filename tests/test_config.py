@@ -16,7 +16,7 @@ def test_settings_loaded_from_env():
     assert settings.TTS_MODEL == "gemini-3.8-flash-tts"
     assert settings.ANALYST_MODEL == "gemini-4-carbon"
     assert settings.META_API_VERSION == "v21.0"
-    assert settings.META_VERIFY_TOKEN == "clandexis_meta_webhook_verify_token_2026"
+    assert settings.META_VERIFY_TOKEN == os.environ.get("META_VERIFY_TOKEN", os.getenv("WHATSAPP_VERIFY_TOKEN", ""))
     assert isinstance(settings.PORT, int)
     assert isinstance(settings.CONFIDENCE_THRESHOLD, float)
     assert settings.CONFIDENCE_THRESHOLD == 0.85
@@ -43,3 +43,19 @@ def test_environment_override(monkeypatch):
     assert custom_settings.GCP_PROJECT_ID == "clandexis-prod-2026"
     assert custom_settings.HIGH_CREDIT_THRESHOLD == 10000.00
     assert custom_settings.is_production is True
+
+
+def test_whatsapp_aliases_and_explicit_disable(monkeypatch):
+    pairs = {
+        'META_VERIFY_TOKEN': 'WHATSAPP_VERIFY_TOKEN',
+        'META_WHATSAPP_TOKEN': 'WHATSAPP_ACCESS_TOKEN',
+        'META_PHONE_NUMBER_ID': 'WHATSAPP_PHONE_NUMBER_ID',
+        'META_APP_SECRET': 'META-WHATSAPP_APP_SECRET',
+    }
+    for primary, alias in pairs.items():
+        monkeypatch.delenv(primary, raising=False)
+        monkeypatch.setenv(alias, 'test-value')
+    assert all(getattr(Settings(), key) == 'test-value' for key in pairs)
+    for primary in pairs:
+        monkeypatch.setenv(primary, '')
+    assert all(getattr(Settings(), key) == '' for key in pairs)

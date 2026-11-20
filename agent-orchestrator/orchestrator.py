@@ -1,20 +1,16 @@
-"""
-Agent Orchestrator Service:
-Bridges Inbound Webhook messages with Multimodal Gemini Extractor and Stage 4 Business Validator.
-Maps candidate transactions into Clandexis Canonical and Firestore entity schemas.
-"""
-
+"""Route replies before extraction; stage persisted candidates before approval."""
 import logging
-from typing import Optional, Tuple
-from app.pipeline import PipelineService
-from app.schemas.transaction import TransactionCandidate, ProcessingResult
-from models.canonical import InboundMessage, OutboundMessage, CanonicalButton
-from models.firestore_schema import TransactionIntent, TransactionStatus
+import re
+from app.schemas.transaction import ProcessingResult
+from app.services.confirmation import (
+    AuthenticatedMerchant, ConfirmationError, PostingResult, button_id,
+    get_confirmation_service,
+)
+from models.canonical import InboundMessage, OutboundMessage, CanonicalButton, MessageType
+from models.firestore_schema import TransactionIntent
 
 logger = logging.getLogger("agent-orchestrator")
-
-# Initialize multimodal pipeline
-pipeline = PipelineService()
+pipeline = None  # Lazy: confirmation callbacks must never initialize the extractor.
 
 INTENT_MAPPING = {
     "sale": TransactionIntent.SALE_INVOICE,
@@ -27,85 +23,155 @@ INTENT_MAPPING = {
     "unknown": TransactionIntent.UNKNOWN,
 }
 
-def orchestrate_inbound_message(message: InboundMessage) -> Tuple[ProcessingResult, OutboundMessage]:
+
+def posting_outbound(phone: str, result: PostingResult) -> OutboundMessage:
+    balances = ", ".join(f"{sku}: {quantity}" for sku, quantity in result.inventory_balance.items())
+    return OutboundMessage(recipient_phone=phone, text_content=(
+        f"Posting status: {result.posting_status}\nTransaction: {result.transaction_id}\n"
+        f"Amount paid: {result.amount_paid}\nCredit outstanding: {result.credit_outstanding}\n"
+        f"Inventory balance: {balances or 'No inventory movement'}"))
+
+
+def orchestrate_inbound_message(message: InboundMessage, *, media_bytes: bytes | None = None, conversation: dict | None = None):
+    """Canonical input must come from the authenticated, merchant-resolved adapter.
+
+    Result is ProcessingResult for extraction, PostingResult for commit, None for
+    cancellation/errors. Transport dispatch occurs only after this function returns.
     """
-    Process inbound message from Meta WhatsApp:
-    1. Extract multimodal candidate via Gemini 3.5/3.8 Flash.
-    2. Run Stage 4 Business Validation.
-    3. Generate appropriate OutboundMessage (Confirmation / Clarification Button / Error).
-    """
-    merchant_id = message.tenant_id
-    sender_phone = message.sender_phone
-    
-    # 1. Execute Pipeline
+    global pipeline
+    if message.message_type not in (MessageType.TEXT, MessageType.AUDIO, MessageType.IMAGE,
+            MessageType.DOCUMENT, MessageType.INTERACTIVE_BUTTON, MessageType.INTERACTIVE_LIST):
+        return None, OutboundMessage(recipient_phone=message.sender_phone,
+            text_content="Unsupported message type. Nothing posted.")
+    durable_processing = conversation is not None
+    conversation = conversation if conversation is not None else {}
+    from app.services.conversation_language import preference, question
+    language, script = preference(message.text_content or "", conversation)
+    conversation.update(detected_language=language, script_preference=script)
+    merchant = AuthenticatedMerchant(message.tenant_id, actor_phone=message.sender_phone)
+    try:
+        service = get_confirmation_service()
+        if message.message_type == MessageType.TEXT and (message.text_content or "").strip().upper() in ("YES", "NO"):
+            raise ConfirmationError("Use the Confirm or Cancel button for the specific candidate.")
+        reply = service.parse_reply(merchant, message)
+        if reply:
+            candidate_id, action = reply
+            if conversation.get("active_candidate_id") not in (None, candidate_id):
+                raise ConfirmationError("Another candidate is active. Continue or cancel it first.")
+            if action == "confirm" and conversation.get("active_candidate_id") == candidate_id:
+                current = service.ledger.get_candidate(merchant.merchant_id, candidate_id)
+                if conversation.get("candidate_revision") != str(current.revision):
+                    raise ConfirmationError("Candidate changed. Review its latest revision in the dashboard.")
+            result = service.handle_confirmation(merchant, candidate_id, action, message.message_id)
+            conversation["last_candidate_id"] = candidate_id
+            conversation.update(active_candidate_id=None, latest_question=None, missing_fields=[], candidate_revision=None, expires_at=None)
+            if isinstance(result, PostingResult):
+                return result, posting_outbound(message.sender_phone, result)
+            return None, OutboundMessage(recipient_phone=message.sender_phone,
+                                         text_content=f"Posting status: {result}. Nothing posted.")
+    except ConfirmationError as exc:
+        return None, OutboundMessage(recipient_phone=message.sender_phone, text_content=str(exc))
+
+    # Reporting requests must never enter financial extraction or clarify a sale.
+    if message.message_type == MessageType.TEXT and re.search(
+            r"\b(pdf|ledgers?|reports?)\b", message.text_content or "", re.IGNORECASE):
+        return None, OutboundMessage(recipient_phone=message.sender_phone,
+            text_content="Please use the authenticated dashboard for ledger reports and invoice downloads. Nothing posted.")
+    reviewing = None
+    if conversation.get("active_candidate_id"):
+        row = service.ledger.get_candidate(merchant.merchant_id, conversation["active_candidate_id"])
+        if row.status != "AWAITING_CONFIRMATION" or row.expires_at <= service.clock():
+            conversation.update(active_candidate_id=None, latest_question=None, missing_fields=[], candidate_revision=None, expires_at=None)
+            return None, OutboundMessage(recipient_phone=message.sender_phone,
+                text_content="The pending candidate is closed or expired. Please resend your transaction.")
+        if (message.text_content or "").strip().lower() == "continue":
+            return None, OutboundMessage(recipient_phone=message.sender_phone,
+                text_content=conversation.get("latest_question") or f"Review candidate {row.candidate_id} and use its Confirm or Cancel button.")
+        if (not row.candidate.needs_clarification and not row.candidate.requires_review) or re.search(
+                r"\b(sold|sell|sale|ammanu|ammnu|purchase|bought|stock|repaid|becha|bechi)\b|అమ్మ|बेच", message.text_content or "", re.I):
+            return None, OutboundMessage(recipient_phone=message.sender_phone,
+                text_content=f"Continue candidate {row.candidate_id} or cancel it before starting another transaction.",
+                message_type=MessageType.INTERACTIVE_BUTTON, interactive_body=f"Continue the pending candidate {row.candidate_id}, or cancel it and resend the new transaction.",
+                buttons=[CanonicalButton(id=button_id(row.candidate_id, "cancel"), title="Cancel pending")])
+        reviewing = row
+    raw_text = message.text_content
+    if reviewing:
+        raw_text = ("Clarify this same transaction using the merchant reply. Preserve buyer and items. "
+                    "Leave unstated price and payment details null. Ask for remaining missing details. "
+                    f"Use language {language} and script {script}. Ask one specific missing-field question at a time. "
+                    f"Reassess missing_fields and clarification flags after each reply. "
+                    f"Current facts: {reviewing.candidate.model_dump_json()}\nMerchant reply: {message.text_content}")
+    if pipeline is None:
+        from app.pipeline import PipelineService
+        pipeline = PipelineService()
     result = pipeline.process_and_interpret(
-        merchant_id=merchant_id,
-        message_id=message.message_id,
-        raw_text=message.text_content,
-        media_path=message.media_url,  # Direct path if downloaded locally
-    )
-    
-    tx: TransactionCandidate = result.extraction.transactions[0] if result.extraction.transactions else None
-    
-    if not tx:
-        outbound = OutboundMessage(
-            recipient_phone=sender_phone,
-            text_content="⚠️ Could not process your request. Please try again with clear voice or text."
-        )
-        return result, outbound
-
-    # 2. Check for Duplicate
+        merchant_id=message.tenant_id, message_id=message.message_id,
+        raw_text=raw_text, media_path=message.media_url,
+        deduplicate=not durable_processing,
+        media_bytes=media_bytes, mime_type=(message.media_mime_type or "").split(";")[0].strip().lower() or None)
     if result.input_metadata.is_duplicate:
-        outbound = OutboundMessage(
-            recipient_phone=sender_phone,
-            text_content="ℹ️ Message already received and processed. Duplicate ignored."
-        )
-        return result, outbound
-
-    # 3. Formulate WhatsApp Response based on Validation Status
+        return result, OutboundMessage(recipient_phone=message.sender_phone,
+                                       text_content="Message already received. Duplicate ignored.")
+    transactions = result.extraction.transactions
+    if not transactions:
+        return result, OutboundMessage(recipient_phone=message.sender_phone,
+                                       text_content="Could not process your request. Please send clear details.")
+    # Do not silently discard additional extracted transactions or approve a bundle
+    # using one button. Ask for individual submissions until transport supports a batch.
+    if len(transactions) != 1:
+        return result, OutboundMessage(recipient_phone=message.sender_phone,
+                                       text_content="Please send one transaction at a time. Nothing posted.")
+    tx = transactions[0]
+    if tx.schema_version != "1.1":
+        return result, OutboundMessage(recipient_phone=message.sender_phone,
+            text_content="Unsupported extraction schema. Nothing posted.")
+    if tx.transaction_type in ("query", "unknown"):
+        return result, OutboundMessage(recipient_phone=message.sender_phone,
+            text_content="This request cannot post a transaction. Use the dashboard for reports. Nothing posted.")
     if tx.validation_status == "REJECTED":
-        warning_text = "\n".join(f"• {w}" for w in tx.validation_warnings)
-        outbound = OutboundMessage(
-            recipient_phone=sender_phone,
-            text_content=f"❌ *Transaction Rejected*\n{warning_text}\n\nPlease check the amounts and send again."
-        )
-    elif tx.needs_clarification or tx.validation_status == "NEEDS_REVIEW":
-        q_text = tx.clarification_question or "Please confirm the transaction details before we record it."
-        warning_str = f"\n_Note: {tx.validation_warnings[0]}_" if tx.validation_warnings else ""
-        
-        # Dispatch 1-Tap Quick-Reply Confirmation buttons
-        outbound = OutboundMessage(
-            recipient_phone=sender_phone,
-            interactive_header="⚠️ Clarification Required",
-            interactive_body=f"{q_text}{warning_str}\n\n*Party:* {tx.buyer_name or 'N/A'}\n*Total:* ₹{tx.total_amount or 0:.2f}",
-            interactive_footer="Clandexis Invisible ERP",
-            buttons=[
-                CanonicalButton(id=f"CONFIRM_{message.message_id}", title="✅ Confirm (हाँ)"),
-                CanonicalButton(id=f"CANCEL_{message.message_id}", title="❌ Cancel (रद्द)"),
-            ]
-        )
-    else:
-        # ACCEPTED: Clean validated transaction candidate ready for ledger commit
-        items_summary = "\n".join(
-            f"• {i.quantity or 1} {i.item_name} @ ₹{i.unit_price or 0:.2f} = ₹{i.line_total or 0:.2f}"
-            for i in tx.items
-        ) if tx.items else "• General Entry"
-        
-        paid_info = f"₹{tx.amount_paid:.2f}" if tx.amount_paid is not None else "₹0.00"
-        credit_info = f"₹{tx.credit_amount:.2f}" if tx.credit_amount is not None else "₹0.00"
+        return result, OutboundMessage(recipient_phone=message.sender_phone,
+            text_content="❌ *Transaction Rejected*\n" + "\n".join(tx.validation_warnings))
+    try:
+        if reviewing:
+            if tx.transaction_type != reviewing.candidate.transaction_type or tx.buyer_name != reviewing.candidate.buyer_name:
+                raise ConfirmationError("Reply changed the buyer or transaction type. Review the candidate in the dashboard.")
+            known = reviewing.candidate
+            if len(tx.items) != len(known.items) or any(
+                    getattr(old, field) is not None and getattr(old, field) != getattr(new, field)
+                    for old, new in zip(known.items, tx.items)
+                    for field in ("item_name", "quantity", "unit_price")):
+                raise ConfirmationError("Reply changed known items. Continue or cancel the pending candidate.")
+            if any(p not in tx.payments for p in known.payments):
+                raise ConfirmationError("Reply changed known payments. Review the pending candidate.")
+            row = service.ledger.replace_reviewed_candidate(
+                merchant.merchant_id, reviewing.candidate_id, reviewing.revision,
+                tx, message.text_content or "Media clarification", service.clock())
+        else:
+            row = service.stage(merchant, message.message_id, 0, tx)
+        review = (row.candidate.validation_status == "NEEDS_REVIEW"
+                  or row.candidate.needs_clarification or row.candidate.requires_review)
+        latest_question, missing = question(row.candidate, language, script)
+        conversation.update(active_candidate_id=row.candidate_id, candidate_revision=str(row.revision),
+            expires_at=row.expires_at, missing_fields=missing, latest_question=latest_question if review else None)
+        body = latest_question if review else "Please confirm these transaction details."
+        body += f"\nParty: {row.candidate.buyer_name or 'N/A'}\n"
+        for item in row.candidate.items:
+            body += f"{item.item_name}: {item.quantity} × {item.unit_price}\n"
+        for payment in row.candidate.payments:
+            body += f"{payment.method}: {payment.amount}\n"
+        body += f"Paid: {row.candidate.amount_paid}\nCredit: {row.candidate.credit_amount}\n"
 
-        outbound = OutboundMessage(
-            recipient_phone=sender_phone,
-            text_content=(
-                f"✅ *Recorded {tx.transaction_type.capitalize()}*\n"
-                f"*Party:* {tx.buyer_name or 'Direct Customer'}\n"
-                f"{items_summary}\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"*Total:* ₹{tx.total_amount or 0:.2f}\n"
-                f"*Paid:* {paid_info}\n"
-                f"*Balance Due (Udhaar):* {credit_info}\n\n"
-                f"_Entry posted to ledger successfully._"
-            )
-        )
-        
-    return result, outbound
+        body += f"Total: {row.candidate.currency} {row.candidate.total_amount}\n"
+        body += f"Candidate: {row.candidate_id}\nNothing posted yet."
+        if review:
+            body += "\nCorrection or explicit review and revalidation is required before Confirm can post."
+        if review:
+            return result, OutboundMessage(recipient_phone=message.sender_phone, text_content=body)
+        return result, OutboundMessage(
+            recipient_phone=message.sender_phone, message_type=MessageType.INTERACTIVE_BUTTON,
+            interactive_header="Clarification Required" if review else "Confirm Transaction",
+            interactive_body=body, interactive_footer="Clandexis",
+            buttons=[CanonicalButton(id=button_id(row.candidate_id, "confirm"), title="✅ Confirm (हाँ)"),
+                     CanonicalButton(id=button_id(row.candidate_id, "cancel"), title="❌ Cancel (रद्द)")])
+    except ConfirmationError as exc:
+        return result, OutboundMessage(recipient_phone=message.sender_phone, text_content=str(exc))

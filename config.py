@@ -15,15 +15,22 @@ from pydantic import BaseModel, Field
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
 if ENV_PATH.exists():
-    load_dotenv(dotenv_path=ENV_PATH, override=True)
+    load_dotenv(dotenv_path=ENV_PATH, override=False)
 else:
-    load_dotenv(override=True)
+    load_dotenv(override=False)
+
+
+def _meta_env(primary: str, *aliases: str):
+    # An explicitly empty primary setting disables the integration in local demos.
+    return next((os.environ[k] for k in (primary, *aliases) if k in os.environ), None)
 
 
 class Settings(BaseModel):
     # ==========================================================================
     # Google Cloud Platform (GCP)
     # ==========================================================================
+    DATABASE_BACKEND: str = Field(default_factory=lambda: os.getenv("DATABASE_BACKEND", "firestore"))
+    DATABASE_URL: Optional[str] = Field(default_factory=lambda: os.getenv("DATABASE_URL"))
     GCP_PROJECT_ID: str = Field(default_factory=lambda: os.getenv("GCP_PROJECT_ID", "clandexis"))
     GCP_REGION: str = Field(default_factory=lambda: os.getenv("GCP_REGION", "asia-south1"))
     FIRESTORE_DATABASE: str = Field(default_factory=lambda: os.getenv("FIRESTORE_DATABASE", "(default)"))
@@ -44,13 +51,14 @@ class Settings(BaseModel):
     # ==========================================================================
     # Meta WhatsApp Business Cloud API (Graph API v21.0)
     # ==========================================================================
-    META_WHATSAPP_TOKEN: Optional[str] = Field(default_factory=lambda: os.getenv("META_WHATSAPP_TOKEN"))
-    META_PHONE_NUMBER_ID: Optional[str] = Field(default_factory=lambda: os.getenv("META_PHONE_NUMBER_ID"))
+    META_WHATSAPP_TOKEN: Optional[str] = Field(default_factory=lambda: _meta_env("META_WHATSAPP_TOKEN", "WHATSAPP_ACCESS_TOKEN"))
+    META_PHONE_NUMBER_ID: Optional[str] = Field(default_factory=lambda: _meta_env("META_PHONE_NUMBER_ID", "WHATSAPP_PHONE_NUMBER_ID"))
+    WHATSAPP_DEMO_PHONE_MAP: str = Field(default_factory=lambda: os.getenv("WHATSAPP_DEMO_PHONE_MAP", "{}"))
     META_WABA_ID: Optional[str] = Field(default_factory=lambda: os.getenv("META_WABA_ID"))
     META_VERIFY_TOKEN: str = Field(
-        default_factory=lambda: os.getenv("META_VERIFY_TOKEN", "clandexis_meta_webhook_verify_token_2026")
+        default_factory=lambda: _meta_env("META_VERIFY_TOKEN", "WHATSAPP_VERIFY_TOKEN") or ""
     )
-    META_APP_SECRET: Optional[str] = Field(default_factory=lambda: os.getenv("META_APP_SECRET"))
+    META_APP_SECRET: Optional[str] = Field(default_factory=lambda: _meta_env("META_APP_SECRET", "WHATSAPP_APP_SECRET", "META-WHATSAPP_APP_SECRET"))
     META_API_VERSION: str = Field(default_factory=lambda: os.getenv("META_API_VERSION", "v21.0"))
     META_GRAPH_BASE_URL: str = Field(default_factory=lambda: os.getenv("META_GRAPH_BASE_URL", "https://graph.facebook.com"))
 
@@ -84,6 +92,17 @@ class Settings(BaseModel):
     HIGH_CREDIT_THRESHOLD: float = Field(
         default_factory=lambda: float(os.getenv("HIGH_CREDIT_THRESHOLD", "5000.00"))
     )
+
+    TRUSTED_ORIGINS: list[str] = Field(default_factory=lambda: [
+        value.strip() for value in os.getenv("TRUSTED_ORIGINS", "").split(",")
+        if value.strip() and value.strip() != "*"
+    ])
+    DASHBOARD_SESSION_SECRET: str = Field(default_factory=lambda: os.getenv("DASHBOARD_SESSION_SECRET", ""))
+    DASHBOARD_DEMO_USERNAME: str = Field(default_factory=lambda: os.getenv("DASHBOARD_DEMO_USERNAME", "demo"))
+    DASHBOARD_DEMO_PASSWORD: str = Field(default_factory=lambda: os.getenv("DASHBOARD_DEMO_PASSWORD", ""))
+    DASHBOARD_DEMO_MERCHANT_ID: str = Field(default_factory=lambda: os.getenv("DASHBOARD_DEMO_MERCHANT_ID", ""))
+    INTERNAL_SEND_TOKEN: str = Field(default_factory=lambda: os.getenv("INTERNAL_SEND_TOKEN", ""))
+    INVOICE_LOCAL_ROOT: Optional[str] = Field(default_factory=lambda: os.getenv("INVOICE_LOCAL_ROOT"))
 
     @property
     def is_production(self) -> bool:
