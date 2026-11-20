@@ -29,9 +29,25 @@ query_service = QueryService()
 
 def posting_outbound(phone: str, result: PostingResult, language: str = "en",
                      script: str = "Latin") -> OutboundMessage:
+    labels = copy_for(language, script)
+    body = posting_summary(result, language, script)
     return OutboundMessage(
         recipient_phone=phone,
-        text_content=posting_summary(result, language, script),
+        message_type=MessageType.INTERACTIVE_BUTTON,
+        interactive_header=f"✅ {labels.get('posted', 'Transaction recorded')}",
+        interactive_body=body,
+        interactive_footer="Clandexis Invisible ERP",
+        buttons=[
+            CanonicalButton(
+                id=f"view_pdf_{result.transaction_id}",
+                title="📄 PDF Invoice",
+            ),
+            CanonicalButton(
+                id=f"view_ledger_{result.transaction_id}",
+                title="📊 Party Ledger",
+            ),
+        ],
+        text_content=body,
     )
 
 
@@ -246,10 +262,17 @@ def orchestrate_inbound_message(
             text_content=ai_reply,
         )
     if tx.validation_status == "REJECTED":
+        reason = "\n".join(tx.validation_warnings)
         return result, OutboundMessage(
             recipient_phone=message.sender_phone,
-            text_content="❌ *Transaction Rejected*\n"
-            + "\n".join(tx.validation_warnings),
+            message_type=MessageType.INTERACTIVE_BUTTON,
+            interactive_header="❌ Transaction Rejected",
+            interactive_body=f"❌ *Transaction Rejected*\n{reason}",
+            interactive_footer="Clandexis Invisible ERP",
+            buttons=[
+                CanonicalButton(id=f"retry_{message.message_id}", title="🔄 Try Again"),
+            ],
+            text_content="❌ *Transaction Rejected*\n" + reason,
         )
 
     try:

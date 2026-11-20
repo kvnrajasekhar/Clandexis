@@ -221,3 +221,38 @@ def test_meta_webhook_unregistered_sender_extraction(mapped_service):
 
     unregistered = service.extract_unregistered_senders(raw_payload)
     assert unregistered == ["+15551234567"]
+
+
+@pytest.mark.asyncio
+async def test_meta_dispatch_interactive_card(monkeypatch):
+    from models.canonical import OutboundMessage, CanonicalButton
+    
+    service = MetaWhatsAppService(token="fake_token", phone_number_id="123456")
+    captured_payload = None
+
+    async def mock_post(payload):
+        nonlocal captured_payload
+        captured_payload = payload
+        return None
+
+    monkeypatch.setattr(service, "_post_message", mock_post)
+
+    outbound = OutboundMessage(
+        recipient_phone="+919876543210",
+        message_type=MessageType.INTERACTIVE_BUTTON,
+        interactive_header="⚠️ Confirmation Required",
+        interactive_body="Party: Ramesh\nTotal: ₹5000.00\nUdhaar: ₹3000.00",
+        interactive_footer="Clandexis Invisible ERP",
+        buttons=[
+            CanonicalButton(id="CONFIRM_123", title="✅ Confirm (हाँ)"),
+            CanonicalButton(id="CANCEL_123", title="❌ Cancel (रद्द)"),
+        ],
+    )
+
+    await service.dispatch_outbound(outbound)
+    assert captured_payload is not None
+    assert captured_payload.to == "919876543210"
+    assert captured_payload.interactive.header.text == "⚠️ Confirmation Required"
+    assert "Party: Ramesh" in captured_payload.interactive.body.text
+    assert len(captured_payload.interactive.action.buttons) == 2
+    assert captured_payload.interactive.action.buttons[0].reply.id == "CONFIRM_123"

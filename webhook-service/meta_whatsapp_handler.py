@@ -147,6 +147,60 @@ class MetaWhatsAppService:
 
         return unregistered
 
+    def parse_unregistered_inbound_messages(self, raw_data: Dict[str, Any]) -> List[InboundMessage]:
+        """
+        Parses messages from senders who do not have an active/approved merchant account yet.
+        Enables interactive WhatsApp merchant onboarding without dropping messages.
+        """
+        inbound_messages: List[InboundMessage] = []
+        try:
+            payload = MetaWebhookPayload.model_validate(raw_data)
+        except Exception:
+            return inbound_messages
+
+        for entry in payload.entry:
+            for change in entry.changes:
+                value = change.value
+                if not value.messages:
+                    continue
+                if self.phone_number_id and value.metadata.phone_number_id and value.metadata.phone_number_id != self.phone_number_id:
+                    continue
+
+                contact_map = {c.wa_id: (c.profile.name if c.profile else None) for c in value.contacts or []}
+
+                for msg in value.messages:
+                    sender_wa_id = msg.from_user
+                    from app.services.whatsapp_identity import normalize_phone
+                    try:
+                        sender_phone = normalize_phone(sender_wa_id)
+                    except ValueError:
+                        continue
+                    if sender_phone == normalize_phone(value.metadata.display_phone_number):
+                        continue
+                    if not re.fullmatch(r"\+[1-9][0-9]{1,14}", sender_phone):
+                        continue
+                    tenant_id = resolve_sender(sender_phone)
+                    if tenant_id:
+                        continue  # Already registered
+
+                    sender_name = contact_map.get(sender_wa_id)
+                    canonical_msg = self._normalize_message(
+                        msg=msg,
+                        tenant_id=sender_phone,
+                        sender_phone=sender_phone,
+                        sender_name=sender_name,
+                        raw_payload={"object": raw_data.get("object"), "entry": [{
+                            "id": entry.id, "changes": [{"field": change.field, "value": {
+                                "metadata": value.metadata.model_dump(mode="json"),
+                                "messages": [msg.model_dump(mode="json", by_alias=True, exclude_none=True)]
+                            }}]
+                        }]},
+                    )
+                    if canonical_msg:
+                        inbound_messages.append(canonical_msg)
+
+        return inbound_messages
+
     def _normalize_message(
         self,
         msg: MetaMessage,
@@ -267,10 +321,8 @@ class MetaWhatsAppService:
         """
         to_phone = message.recipient_phone.replace("+", "")
         
-        if message.message_type == MessageType.TEXT and message.text_content:
-            return await self.send_text_message(to_phone, message.text_content)
-        
-        elif message.message_type == MessageType.INTERACTIVE_BUTTON and message.buttons:
+        # 1. Interactive Button Card (routes if buttons are present or type is INTERACTIVE_BUTTON)
+        if (message.message_type == MessageType.INTERACTIVE_BUTTON or message.buttons) and message.buttons:
             return await self.send_interactive_buttons(
                 to=to_phone,
                 body_text=message.interactive_body or message.text_content or "Please confirm:",
@@ -292,6 +344,9 @@ class MetaWhatsAppService:
                 to=to_phone,
                 audio_url=message.audio_url,
             )
+
+        elif message.text_content or message.interactive_body:
+            return await self.send_text_message(to_phone, message.text_content or message.interactive_body or "")
 
         logger.warning(f"Unsupported outbound message format: {message.message_type}")
         return None
@@ -336,9 +391,9 @@ class MetaWhatsAppService:
             type=MetaMessageType.INTERACTIVE,
             interactive=MetaInteractivePayload(
                 type="button",
-                header=MetaInteractiveHeader(type="text", text=header_text) if header_text else None,
-                body=MetaInteractiveBody(text=body_text),
-                footer=MetaInteractiveFooter(text=footer_text) if footer_text else None,
+                header=MetaInteractiveHeader(type="text", text=header_text[:60]) if header_text else None,
+                body=MetaInteractiveBody(text=body_text[:1024]),
+                footer=MetaInteractiveFooter(text=footer_text[:60]) if footer_text else None,
                 action=MetaInteractiveAction(buttons=meta_buttons),
             ),
         )
