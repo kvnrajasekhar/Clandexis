@@ -140,11 +140,29 @@ def hold_message(reasons: list[str], language: str, script: str) -> str:
             ("te", "Telugu"): "ఈ అమ్మకానికి సరిపడా స్టాక్ లేదు.",
             ("hi", "Latin"): "Is sale ke liye stock kaafi nahi hai.",
             ("hi", "Devanagari"): "इस बिक्री के लिए पर्याप्त स्टॉक नहीं है।",
+            ("en", "Latin"): "Insufficient stock available for this sale.",
+        },
+        "catalog": {
+            ("te", "Telugu"): "ఈ వస్తువు కేటలాగ్‌లో కనుగొనబడలేదు.",
+            ("te", "Latin"): "Ee item catalog lo ledu.",
+            ("hi", "Devanagari"): "यह सामान कैटलॉग में नहीं मिला।",
+            ("hi", "Latin"): "Yeh item catalog mein nahi mila.",
+            ("en", "Latin"): "This product was not found in your catalog.",
         },
     }
-    return "; ".join(
-        translations.get(reason, {}).get((language, script), reason) for reason in reasons
-    )
+    msgs = []
+    for reason in reasons:
+        r_str = str(reason)
+        r_lower = r_str.lower()
+        if r_str in translations:
+            msgs.append(translations[r_str].get((language, script), r_str))
+        elif "stock" in r_lower:
+            msgs.append(translations["Insufficient stock"].get((language, script), r_str))
+        elif "catalog" in r_lower or "product" in r_lower:
+            msgs.append(translations["catalog"].get((language, script), r_str))
+        else:
+            msgs.append(r_str)
+    return "; ".join(msgs)
 
 
 def _amount(value) -> str:

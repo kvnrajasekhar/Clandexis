@@ -74,8 +74,13 @@ def orchestrate_inbound_message(
 
     durable_processing = conversation is not None
     conversation = conversation if conversation is not None else {}
-    from app.services.conversation_language import preference, question, SUPPORTED_LANGUAGES
+    from app.services.conversation_language import preference, question, resolve_language_and_script, SUPPORTED_LANGUAGES
 
+    is_audio = (
+        message.message_type == MessageType.AUDIO
+        or media_bytes is not None
+        or bool(message.media_url)
+    )
     language, script = preference(message.text_content or "", conversation)
 
     # If message has no text (e.g. voice note/image) or language is default, hydrate from merchant profile in DB
@@ -95,7 +100,10 @@ def orchestrate_inbound_message(
             except Exception:
                 pass
 
-    conversation.update(detected_language=language, script_preference=script)
+    if not is_audio and (message.text_content or "").strip():
+        conversation.update(detected_language=language, script_preference=script)
+    elif not conversation.get("detected_language"):
+        conversation.update(detected_language=language, script_preference=script)
     merchant = AuthenticatedMerchant(
         message.tenant_id, actor_phone=message.sender_phone
     )
@@ -354,6 +362,16 @@ def orchestrate_inbound_message(
             recipient_phone=message.sender_phone,
             text_content="Unsupported extraction schema. Nothing posted.",
         )
+
+    # For audio or multimodal input, resolve spoken language directly from Gemini extraction
+    language, script = resolve_language_and_script(
+        text=message.text_content,
+        tx=tx,
+        previous=conversation,
+        is_audio=is_audio,
+    )
+    conversation.update(detected_language=language, script_preference=script)
+
     if tx.transaction_type in ("query", "unknown"):
         ai_reply = tx.clarification_question or (
             "This request cannot post a transaction. Use the dashboard for unsupported reports."
@@ -382,12 +400,18 @@ def orchestrate_inbound_message(
         if reviewing:
             if (
                 tx.transaction_type != reviewing.candidate.transaction_type
-                or tx.buyer_name != reviewing.candidate.buyer_name
+                or (
+                    reviewing.candidate.buyer_name
+                    and tx.buyer_name
+                    and reviewing.candidate.buyer_name.lower() != tx.buyer_name.lower()
+                )
             ):
                 raise ConfirmationError(
                     "Reply changed the buyer or transaction type. "
                     "Review the candidate in the dashboard."
                 )
+            if not tx.buyer_name and reviewing.candidate.buyer_name:
+                tx.buyer_name = reviewing.candidate.buyer_name
             known = reviewing.candidate
             if len(tx.items) != len(known.items) or any(
                 getattr(old, field) is not None
@@ -422,10 +446,12 @@ def orchestrate_inbound_message(
         if not review and preflight:
             holds = preflight(merchant.merchant_id, row.candidate_id, service.clock())
             review = bool(holds)
-        fallback_question, missing = question(row.candidate, language, script)
-        clarification_text = hold_message(holds, language, script) if holds else (
-            fallback_question or tx.clarification_question
+        all_warnings = list(holds) + list(row.candidate.validation_warnings or [])
+        clarification_text, missing = question(
+            row.candidate, language, script, warnings=all_warnings
         )
+        if holds and not clarification_text:
+            clarification_text = hold_message(holds, language, script)
         conversation.update(
             active_candidate_id=row.candidate_id,
             candidate_revision=str(row.revision),
