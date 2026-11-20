@@ -6,7 +6,8 @@ Every function takes an optional `db=` (a `google.cloud.firestore.Client`); defa
 
 ```python
 from app.services.ledger import (stage_candidate, confirm_and_commit, cancel_candidate, get_transaction,
-    list_transactions, get_party_balance, get_inventory, get_daily_summary)
+    list_transactions, get_party_balance, get_inventory, get_daily_summary,
+    review_candidate, post_opening_balance, post_opening_balances, get_receivables_reconciliation)
 ```
 
 ## Lifecycle
@@ -17,7 +18,7 @@ from app.services.ledger import (stage_candidate, confirm_and_commit, cancel_can
 | posting_status | meaning |
 |---|---|
 | `PENDING_CONFIRMATION` | validated, awaiting an explicit merchant confirmation (nothing posted) |
-| `NEEDS_REVIEW` | held: extractor clarification outstanding (`hold_source=EXTRACTION`, not confirmable) or ledger hold, e.g. stock/ambiguity (`hold_source=LEDGER`, confirmable again after the cause is fixed) |
+| `NEEDS_REVIEW` | held. `hold_source=EXTRACTION`: validator verdict was NEEDS_REVIEW, or the ledger plan could not be built; **not confirmable** until `review_candidate` releases it. `hold_source=LEDGER`: stock/ambiguity/credit-limit hold raised at confirmation; confirmable again once the cause is fixed |
 | `REJECTED` | arithmetically/semantically invalid (terminal) |
 | `CANCELLED` | merchant cancelled (terminal) |
 | `POSTED` | committed; `committed_txn_id` set |
@@ -35,6 +36,7 @@ posting by itself; **only `confirm_and_commit` posts**. Model confidence never p
   `validation_status` wins (client `ACCEPTED` is never trusted).
 - Idempotent on `(merchant_id, source_message_id, candidate_index)`: repeats return the existing candidate with
   `already_staged=True`; the snapshot is never overwritten.
+- Only `ACCEPTED` candidates become `PENDING_CONFIRMATION`; any `NEEDS_REVIEW` verdict is held with `originally_needs_review=True`.
 - Returns `StagedCandidate{candidate_id, merchant_id, source_message_id, validation_status, posting_status, hold_reasons, validation_warnings, already_staged, expires_at}`.
 - Errors: `MerchantNotFoundError`, `ValueError` (blank ids), pydantic `ValidationError` (malformed candidate).
 
@@ -70,6 +72,34 @@ posting by itself; **only `confirm_and_commit` posts**. Model confidence never p
 
   Any other exception raised during commit leaves **no** partial state (Firestore transaction aborts).
 
+### `review_candidate(merchant_id, candidate_id, *, reviewed_by, corrected_candidate, review_note, expected_snapshot_sha256=None, db=None, now=None) -> StagedCandidate`
+Atomic merchant review/clarification of a `PENDING_CONFIRMATION` or `NEEDS_REVIEW` candidate (this is the method
+`ClaudeLedgerAdapter.replace_reviewed_candidate` calls).
+- `reviewed_by` must be an authorised merchant phone; `review_note` is mandatory.
+- The corrected candidate is fully revalidated server-side (BusinessValidator + ledger plan). Fundamental arithmetic
+  errors are **refused** (`ValidationFailedError`): the snapshot is untouched and the refused attempt is appended to
+  `review_history` with `outcome=REFUSED`.
+- Clean revalidation ⇒ `PENDING_CONFIRMATION`, `review_resolved=True`. Remaining warnings/holds ⇒ stays `NEEDS_REVIEW`
+  (corrected snapshot still recorded, `review_resolved=False`).
+- `extracted_snapshot` / `snapshot_sha256` always hold the **current** revision (what a confirmation must cite in
+  `expected_snapshot_sha256`; stale ⇒ `StaleConfirmationError`). The first extraction is kept in `original_extraction`
+  (+`original_snapshot_sha256`) and every superseded snapshot in `review_history[]` with who/when/why. A candidate with
+  `originally_needs_review` cannot be confirmed unless `review_resolved` is true.
+- Errors: `NotAuthorizedError`, `CandidateNotFoundError`, `InvalidStateError` (POSTED/CANCELLED/REJECTED, integrity failure),
+  `StaleConfirmationError`, `ValidationFailedError`, `ValueError` (blank note).
+
+### `post_opening_balance(merchant_id, party_id, *, posted_by, db=None, now=None) -> OpeningBalanceResult`
+### `post_opening_balances(merchant_id, *, posted_by, db=None, now=None) -> List[OpeningBalanceResult]`
+Explicit opening-balance posting for receivables that pre-date the ledger (e.g. seeded `current_udhaar_balance`):
+Dr `ACCOUNTS_RECEIVABLE` / Cr `OPENING_BALANCE_EQUITY`, one `journal_entries/jrnl_open_<party>` plus an
+`opening_balances/<party>` record. The party balance is not changed and nothing is rewritten. Idempotent (replay returns
+`already_posted=True`); a repeated un-backed discrepancy raises `InvalidStateError` (needs a manual audited adjustment).
+**Call it after seeding.** Until then, a `payment_received` that exceeds the journal-backed part of the receivable
+(`parties.ar_posted_minor`) is held with an "opening-balance" reason. Errors: `NotAuthorizedError`, `PartyNotFoundError`.
+
+### `get_receivables_reconciliation(merchant_id, *, db=None) -> ReceivablesReconciliation`
+`ar_account_balance`, `journal_backed_party_total`, `party_balance_total`, `unposted_opening_total`, `consistent`.
+
 ### `cancel_candidate(merchant_id, candidate_id, *, cancelled_by, reason=None, db=None, now=None) -> CandidateStatus`
 `PENDING_CONFIRMATION`/`NEEDS_REVIEW` → `CANCELLED` (idempotent). `POSTED` ⇒ `InvalidStateError` (committed records are
 never changed). Errors: `NotAuthorizedError`, `CandidateNotFoundError`, `InvalidStateError`.
@@ -99,14 +129,15 @@ committed documents.
 | collection | doc id | notes |
 |---|---|---|
 | *(root)* `merchants/{id}` | phone | existing `Merchant`; optional `authorized_phones: [str]` |
-| `parties` | slug | existing `Party`. Ledger keeps `current_udhaar_balance` (float, legacy) **and** `udhaar_balance_minor` (exact paise, preferred on read; seed docs without it still work) |
+| `parties` | slug | existing `Party`. Ledger keeps `current_udhaar_balance` (float, legacy) **and** `udhaar_balance_minor` (exact paise, preferred on read; seed docs without it still work), plus `ar_posted_minor` (journal-backed part of the receivable) |
+| `opening_balances` | party slug | one record per explicit opening posting |
 | `inventory` | sku | existing `InventoryItem`; `current_stock` updated only by the ledger |
 | `inventory_movements` | `mv_<txn>_<line>` | append-only `InventoryMovement` (+`line_index`) |
-| `transaction_candidates` | `cand_<sha256(merchant,message,index)>` | immutable `extracted_snapshot` + `snapshot_sha256`, `validation_status`, `posting_status`, `created_at`, `confirmed_at`, `expires_at`, `status_history[]`, `commit_result` |
+| `transaction_candidates` | `cand_<sha256(merchant,message,index)>` | `extracted_snapshot` + `snapshot_sha256` (current revision), `original_extraction` (never changes), `validation_status`, `posting_status`, `originally_needs_review`, `review_resolved`, `review_history[]`, `status_history[]`, `created_at`, `confirmed_at`, `expires_at`, `commit_result` |
 | `transactions` | `txn_<same hash>` | existing `Transaction` model + `candidate_id, source_message_id, confirmation_request_id, confirmed_by, business_date, total_minor, received_minor, credit_minor, tax_minor, journal_id, movement_ids`. Created with `create()` ⇒ unique |
 | `payments` | `pay_<txn>_<i>` | actual receipts only (CASH/UPI/BANK_TRANSFER); never credit |
 | `journal_entries` | `jrnl_<txn>` | `lines[{account, debit_minor, credit_minor}]`, balanced |
-| `accounts` | CASH, UPI, BANK, ACCOUNTS_RECEIVABLE, SALES_REVENUE, GST_PAYABLE | running `debit_total_minor`, `credit_total_minor`, `balance_minor` (debit − credit; revenue/liabilities are negative) |
+| `accounts` | CASH, UPI, BANK, ACCOUNTS_RECEIVABLE, SALES_REVENUE, GST_PAYABLE, OPENING_BALANCE_EQUITY | running `debit_total_minor`, `credit_total_minor`, `balance_minor` (debit − credit; revenue/liabilities are negative) |
 | `confirmations` | `conf_<sha256(merchant,request_id)>` | idempotency record for confirmation requests |
 
 Money is computed with `Decimal` (2 dp, `ROUND_HALF_UP`, floats converted through `str`), quantities at 3 dp, and
@@ -118,4 +149,5 @@ with existing models.
 ```
 tests/run_ledger_tests.sh        # needs Java 21+ and firebase-tools; starts the real Firestore emulator
 ```
-Without `FIRESTORE_EMULATOR_HOST` the test module is skipped (not passed).
+Without `FIRESTORE_EMULATOR_HOST` the emulator modules are skipped (not passed). Commits are retried on
+Firestore contention (`_run_txn`), safe because every operation is idempotent and re-reads inside the transaction.
