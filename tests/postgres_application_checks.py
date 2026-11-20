@@ -80,11 +80,6 @@ def app_client(monkeypatch, tmp_path):
         async def dispatch_outbound(self, outbound):
             sent.append(outbound)
 
-        async def send_text_message(self, recipient_phone, text):
-            from models.canonical import OutboundMessage
-            sent.append(OutboundMessage(recipient_phone=recipient_phone, text_content=text))
-            return {"messages": [{"id": "notice"}]}
-
     monkeypatch.setattr(application, "MetaWhatsAppService", Meta)
     with TestClient(application.app, raise_server_exceptions=False) as client:
         yield client, db, merchant, other, phone, second, sent, tmp_path
@@ -477,10 +472,9 @@ def test_stock_hindi_context_unknown_sender_and_database_isolation(
     )
     mock_pipeline(monkeypatch, production)
     assert (
-        text(client, "+12025550101", "sale", "unknown").json()["messages_received"] == 1
+        text(client, "+12025550101", "sale", "unknown").json()["messages_received"] == 0
     )
-    assert len(sent) == 1 and "register" in sent[-1].text_content.lower()
-    sent.clear()
+    assert sent == []
     text(client, phone, "Produced 10 cotton shirts", "production")
     cid = sent[-1].buttons[0].id.split(":")[-1]
     confirm(client, phone, cid, "production-confirm")
