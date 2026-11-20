@@ -25,12 +25,36 @@ def _meta_env(primary: str, *aliases: str):
     return next((os.environ[k] for k in (primary, *aliases) if k in os.environ), None)
 
 
+def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
+    """Fetch setting from env, or fallback to Google Cloud Secret Manager when deployed."""
+    val = os.getenv(key)
+    if val:
+        return val
+    alt = key.lower().replace("_", "-")
+    val = os.getenv(alt)
+    if val:
+        return val
+    project = os.getenv("GCP_PROJECT_ID", "clandexis")
+    try:
+        from google.cloud import secretmanager
+        client = secretmanager.SecretManagerServiceClient()
+        name = f"projects/{project}/secrets/{alt}/versions/latest"
+        res = client.access_secret_version(request={"name": name})
+        secret_str = res.payload.data.decode("utf-8").strip()
+        if secret_str:
+            os.environ[key] = secret_str
+            return secret_str
+    except Exception:
+        pass
+    return default
+
+
 class Settings(BaseModel):
     # ==========================================================================
     # Google Cloud Platform (GCP)
     # ==========================================================================
-    DATABASE_BACKEND: str = Field(default_factory=lambda: os.getenv("DATABASE_BACKEND", "firestore"))
-    DATABASE_URL: Optional[str] = Field(default_factory=lambda: os.getenv("DATABASE_URL"))
+    DATABASE_BACKEND: str = Field(default_factory=lambda: get_secret("DATABASE_BACKEND", "postgres"))
+    DATABASE_URL: Optional[str] = Field(default_factory=lambda: get_secret("DATABASE_URL"))
     GCP_PROJECT_ID: str = Field(default_factory=lambda: os.getenv("GCP_PROJECT_ID", "clandexis"))
     GCP_REGION: str = Field(default_factory=lambda: os.getenv("GCP_REGION", "asia-south1"))
     FIRESTORE_DATABASE: str = Field(default_factory=lambda: os.getenv("FIRESTORE_DATABASE", "(default)"))
@@ -42,7 +66,7 @@ class Settings(BaseModel):
     # ==========================================================================
     # Google AI & Gemini Models
     # ==========================================================================
-    GEMINI_API_KEY: Optional[str] = Field(default_factory=lambda: os.getenv("GEMINI_API_KEY"))
+    GEMINI_API_KEY: Optional[str] = Field(default_factory=lambda: get_secret("GEMINI_API_KEY"))
     ROUTER_MODEL: str = Field(default_factory=lambda: os.getenv("ROUTER_MODEL", "gemini-3.5-flash-lite"))
     EXTRACTOR_MODEL: str = Field(default_factory=lambda: os.getenv("EXTRACTOR_MODEL", "gemini-3.8-flash"))
     TTS_MODEL: str = Field(default_factory=lambda: os.getenv("TTS_MODEL", "gemini-3.8-flash-tts"))
@@ -51,14 +75,20 @@ class Settings(BaseModel):
     # ==========================================================================
     # Meta WhatsApp Business Cloud API (Graph API v21.0)
     # ==========================================================================
-    META_WHATSAPP_TOKEN: Optional[str] = Field(default_factory=lambda: _meta_env("META_WHATSAPP_TOKEN", "WHATSAPP_ACCESS_TOKEN"))
-    META_PHONE_NUMBER_ID: Optional[str] = Field(default_factory=lambda: _meta_env("META_PHONE_NUMBER_ID", "WHATSAPP_PHONE_NUMBER_ID"))
-    WHATSAPP_DEMO_PHONE_MAP: str = Field(default_factory=lambda: os.getenv("WHATSAPP_DEMO_PHONE_MAP", "{}"))
-    META_WABA_ID: Optional[str] = Field(default_factory=lambda: os.getenv("META_WABA_ID"))
-    META_VERIFY_TOKEN: str = Field(
-        default_factory=lambda: _meta_env("META_VERIFY_TOKEN", "WHATSAPP_VERIFY_TOKEN") or ""
+    META_WHATSAPP_TOKEN: Optional[str] = Field(
+        default_factory=lambda: _meta_env("META_WHATSAPP_TOKEN", "WHATSAPP_ACCESS_TOKEN") or get_secret("META_WHATSAPP_TOKEN")
     )
-    META_APP_SECRET: Optional[str] = Field(default_factory=lambda: _meta_env("META_APP_SECRET", "WHATSAPP_APP_SECRET", "META-WHATSAPP_APP_SECRET"))
+    META_PHONE_NUMBER_ID: Optional[str] = Field(
+        default_factory=lambda: _meta_env("META_PHONE_NUMBER_ID", "WHATSAPP_PHONE_NUMBER_ID") or get_secret("META_PHONE_NUMBER_ID")
+    )
+    WHATSAPP_DEMO_PHONE_MAP: str = Field(default_factory=lambda: os.getenv("WHATSAPP_DEMO_PHONE_MAP", "{}"))
+    META_WABA_ID: Optional[str] = Field(default_factory=lambda: get_secret("META_WABA_ID"))
+    META_VERIFY_TOKEN: str = Field(
+        default_factory=lambda: _meta_env("META_VERIFY_TOKEN", "WHATSAPP_VERIFY_TOKEN") or get_secret("META_VERIFY_TOKEN", "")
+    )
+    META_APP_SECRET: Optional[str] = Field(
+        default_factory=lambda: _meta_env("META_APP_SECRET", "WHATSAPP_APP_SECRET") or get_secret("META_APP_SECRET")
+    )
     META_API_VERSION: str = Field(default_factory=lambda: os.getenv("META_API_VERSION", "v21.0"))
     META_GRAPH_BASE_URL: str = Field(default_factory=lambda: os.getenv("META_GRAPH_BASE_URL", "https://graph.facebook.com"))
 
@@ -97,12 +127,12 @@ class Settings(BaseModel):
         value.strip() for value in os.getenv("TRUSTED_ORIGINS", "").split(",")
         if value.strip() and value.strip() != "*"
     ])
-    GOOGLE_CLIENT_ID: Optional[str] = Field(default_factory=lambda: os.getenv("GOOGLE_CLIENT_ID"))
-    DASHBOARD_SESSION_SECRET: str = Field(default_factory=lambda: os.getenv("DASHBOARD_SESSION_SECRET", ""))
+    GOOGLE_CLIENT_ID: Optional[str] = Field(default_factory=lambda: get_secret("GOOGLE_CLIENT_ID"))
+    DASHBOARD_SESSION_SECRET: str = Field(default_factory=lambda: get_secret("DASHBOARD_SESSION_SECRET", ""))
     DASHBOARD_DEMO_USERNAME: str = Field(default_factory=lambda: os.getenv("DASHBOARD_DEMO_USERNAME", "demo"))
     DASHBOARD_DEMO_PASSWORD: str = Field(default_factory=lambda: os.getenv("DASHBOARD_DEMO_PASSWORD", ""))
     DASHBOARD_DEMO_MERCHANT_ID: str = Field(default_factory=lambda: os.getenv("DASHBOARD_DEMO_MERCHANT_ID", ""))
-    INTERNAL_SEND_TOKEN: str = Field(default_factory=lambda: os.getenv("INTERNAL_SEND_TOKEN", ""))
+    INTERNAL_SEND_TOKEN: str = Field(default_factory=lambda: get_secret("INTERNAL_SEND_TOKEN", ""))
     INVOICE_LOCAL_ROOT: Optional[str] = Field(default_factory=lambda: os.getenv("INVOICE_LOCAL_ROOT"))
 
     @property

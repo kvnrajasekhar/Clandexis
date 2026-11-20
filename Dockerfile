@@ -36,6 +36,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy backend application source
 COPY . ./
 
+# Ensure Python packages are real directories (handles zip source extraction flattening symlinks)
+RUN if [ ! -d /app/webhook_service ]; then rm -rf /app/webhook_service && cp -r /app/webhook-service /app/webhook_service; fi && \
+    if [ ! -d /app/agent_orchestrator ]; then rm -rf /app/agent_orchestrator && cp -r /app/agent-orchestrator /app/agent_orchestrator; fi
+
 # Copy built frontend assets into dashboard/dist for static serving
 COPY --from=frontend-builder /app/dashboard/dist ./dashboard/dist
 
