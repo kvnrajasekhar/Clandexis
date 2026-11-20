@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from config import settings
+from inventory.inventory_service import InventoryService
+from inventory.inventory_analytics import InventoryAnalytics
 from models.canonical import CanonicalButton, ChannelType, InboundMessage, MessageType, OutboundMessage
 from models.firestore_schema import (
     InventoryItem,
@@ -46,6 +48,17 @@ class AgentOrchestrator:
         self.inventory: Dict[str, Dict[str, InventoryItem]] = {}  # merchant_id -> {sku_id: InventoryItem}
         self.transactions: Dict[str, Transaction] = {}  # txn_id -> Transaction
         self.movements: Dict[str, List[InventoryMovement]] = {}  # merchant_id -> [InventoryMovement]
+
+        self.inventory_service = InventoryService(
+            inventory_store=self.inventory,
+            movements_store=self.movements,
+            merchants_store=self.merchants,
+        )
+        self.inventory_analytics = InventoryAnalytics(
+            inventory_store=self.inventory,
+            movements_store=self.movements,
+            transactions_store=self.transactions,
+        )
 
         self._seed_default_tenant()
 
@@ -246,12 +259,14 @@ class AgentOrchestrator:
         if not t:
             return None
 
-        # If text indicates transaction recording, do not treat as read-only query
-        txn_action_words = (
-            "bechi", "becha", "sold", "sale", "diya", "kharida", "purchase",
-            "banayi", "manufactured", "produce", "likh lo", "likho", "record"
+        # Action commands (Inventory Setup, Logging, Adjustments, Sales) must NOT be intercepted as read queries
+        action_prefixes = (
+            "add item", "add sku", "naya item", "naya maal", "item add", "kotha saraku", "nayi item",
+            "bechi", "becha", "sold", "diya", "kharida", "purchase",
+            "banayi", "manufactured", "likh lo", "likho", "record",
+            "kharab", "damage", "wastage"
         )
-        if any(w in t for w in txn_action_words):
+        if any(w in t for w in action_prefixes):
             return None
 
         # 1. Help / Info Query
@@ -259,10 +274,19 @@ class AgentOrchestrator:
             help_text = (
                 "🙏 *नमस्ते! Welcome to Clandexis (Invisible ERP)*\n"
                 "Aap seedhe vernacular WhatsApp voice ya text me likhein:\n\n"
+                "📌 *Inventory Setup:*\n"
+                "• _\"Naya item add karo Silk Saree 50 pieces @ 1200 reorder 10\"_\n\n"
+                "📌 *Daily Production:*\n"
+                "• _\"Aaj 200 cotton shirts banayi batch B14\"_\n\n"
+                "📌 *Stock Damage / Wastage:*\n"
+                "• _\"10 cotton shirts kharab ho gayi likh lo\"_\n\n"
                 "📌 *Record Sale/Udhaar:*\n"
                 "• _\"Ramesh ko 10 cotton shirt bechi ₹2000 ki, ₹500 cash diya baaki udhaar\"_\n\n"
-                "📌 *Stock Query:*\n"
-                "• _\"Stock kitna hai?\"_\n\n"
+                "📌 *Stock & Production Analytics:*\n"
+                "• _\"Stock kitna hai?\"_\n"
+                "• _\"Kaun sa maal khatam hone wala hai?\"_ (Low stock alert)\n"
+                "• _\"Aaj kitna maal bana aur kitna bika?\"_ (Production vs Sales)\n"
+                "• _\"Aaj kitna maal bana?\"_ (Production summary)\n\n"
                 "📌 *Party Balance:*\n"
                 "• _\"Ramesh ka udhaar kitna hai?\"_\n\n"
                 "📌 *Daily Summary:*\n"
@@ -275,23 +299,67 @@ class AgentOrchestrator:
                 text_content=help_text,
             )
 
-        # 2. Stock Query
-        if any(w in t for w in ("stock", "maal", "inventory")) or ("kitna" in t and "shirt" in t):
-            items = self.inventory.get(tenant_id, {}).values()
-            if not items:
-                msg = "📦 No inventory registered for this account."
-            else:
-                lines = ["📦 *Current Stock Status (स्टॉक स्थिति)*\n━━━━━━━━━━━━━━━━━━━"]
-                for it in items:
-                    lines.append(f"• *{it.item_name}:* {it.current_stock:.0f} {it.unit} (₹{it.default_unit_price:,.2f})")
-                lines.append("━━━━━━━━━━━━━━━━━━━")
-                msg = "\n".join(lines)
-
+        # 2. Production vs. Sales Comparison Query (FR-01.4)
+        if ("bana" in t and ("bika" in t or "becha" in t or "bikri" in t)) or "production vs sales" in t:
+            report = self.inventory_analytics.get_production_vs_sales(tenant_id, period="today")
             return OutboundMessage(
                 recipient_phone=recipient_phone,
                 channel=ChannelType.META_WHATSAPP,
                 message_type=MessageType.TEXT,
-                text_content=msg,
+                text_content=report["formatted_text"],
+            )
+
+        # 3. Production Output / Summary Query (FR-01.4)
+        if ("kitna" in t or "aaj" in t or "kya" in t) and any(w in t for w in ("maal bana", "production", "output", "thayaru")) and not any(w in t for w in ("banayi", "banaya")):
+            summary = self.inventory_analytics.get_production_summary(tenant_id, period="today")
+            return OutboundMessage(
+                recipient_phone=recipient_phone,
+                channel=ChannelType.META_WHATSAPP,
+                message_type=MessageType.TEXT,
+                text_content=summary["formatted_text"],
+            )
+
+        # 4. Low Stock / Reorder Alert Query (FR-01.4)
+        if any(w in t for w in ("low stock", "khatam", "reorder", "alert", "kam hai")):
+            alerts = self.inventory_analytics.get_low_stock_alerts(tenant_id)
+            return OutboundMessage(
+                recipient_phone=recipient_phone,
+                channel=ChannelType.META_WHATSAPP,
+                message_type=MessageType.TEXT,
+                text_content=alerts["formatted_text"],
+            )
+
+        # 5. Item Movement History Query (FR-01.4)
+        if any(w in t for w in ("history", "movement", "audit")) and any(w in t for w in ("stock", "maal", "shirt", "kurta", "item")):
+            resolved_sku, _, _ = self.inventory_service.resolve_sku(tenant_id, t)
+            target_sku = resolved_sku or "shirt-cotton-l"
+            history = self.inventory_analytics.get_movement_history(tenant_id, target_sku)
+            return OutboundMessage(
+                recipient_phone=recipient_phone,
+                channel=ChannelType.META_WHATSAPP,
+                message_type=MessageType.TEXT,
+                text_content=history["formatted_text"],
+            )
+
+        # If text indicates transaction recording, do not treat as read-only query
+        txn_action_words = (
+            "bechi", "becha", "sold", "diya", "kharida", "purchase",
+            "banayi", "manufactured", "likh lo", "likho", "record",
+            "add item", "naya item", "add sku", "kharab", "damage", "wastage"
+        )
+        if any(w in t for w in txn_action_words):
+            return None
+
+        # 6. Stock Query (Item-Specific or All Catalog) (FR-01.4)
+        if any(w in t for w in ("stock", "maal", "inventory", "saraku")) or ("kitna" in t and any(w in t for w in ("shirt", "kurta", "bacha", "bache", "migilindi"))):
+            resolved_sku, _, conf = self.inventory_service.resolve_sku(tenant_id, t)
+            sku_filter = resolved_sku if conf >= 0.85 else None
+            status_data = self.inventory_analytics.get_stock_status(tenant_id, sku_id=sku_filter)
+            return OutboundMessage(
+                recipient_phone=recipient_phone,
+                channel=ChannelType.META_WHATSAPP,
+                message_type=MessageType.TEXT,
+                text_content=status_data["formatted_text"],
             )
 
         # 3. Party Udhaar Query (must be a query, not a sale transaction)
@@ -465,20 +533,60 @@ class AgentOrchestrator:
         self._commit_ledger_transaction(txn)
         udhaar_val = sum(p.amount for p in payments if p.method == PaymentMethod.UDHAAR_CREDIT)
         settled_val = total_amount - udhaar_val
-        items_desc = "\n".join([f"• {it.quantity:.0f}x {it.item_name} @ ₹{it.unit_price:.2f} = ₹{it.subtotal:.2f}" for it in line_items])
 
-        success_text = (
-            f"✅ *Transaction Recorded (लेन-देन दर्ज)*\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"🧾 *Txn ID:* `{txn_id}`\n"
-            f"👤 *Party:* {txn.party_name}\n"
-            f"{items_desc}\n\n"
-            f"💰 *Total:* ₹{total_amount:,.2f}\n"
-            f"💵 *Settled:* ₹{settled_val:,.2f}\n"
-            f"📒 *Udhaar Added:* ₹{udhaar_val:,.2f}\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"Digital ledger updated."
-        )
+        if txn.intent == TransactionIntent.INVENTORY_SETUP:
+            items_desc = "\n".join([f"• *{it.item_name}:* Initial Stock {it.quantity:.0f} {it.unit} @ ₹{it.unit_price:,.2f}" for it in line_items])
+            success_text = (
+                f"✅ *Transaction Recorded (लेन-देन दर्ज)*\n"
+                f"📦 *Product Catalog Updated (उत्पाद सूची अपडेट)*\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"🧾 *Txn ID:* `{txn_id}`\n"
+                f"{items_desc}\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"New SKU registered and stock balance initialized."
+            )
+        elif txn.intent == TransactionIntent.INVENTORY_ADJUSTMENT:
+            items_desc = "\n".join([f"• *{it.item_name}:* -{it.quantity:.0f} {it.unit} (Damage/Wastage)" for it in line_items])
+            inv_map = self.inventory.get(tenant_id, {})
+            stock_info = ", ".join([f"{inv_map[it.sku_id].current_stock:.0f} {it.unit}" for it in line_items if it.sku_id in inv_map])
+            success_text = (
+                f"✅ *Transaction Recorded (लेन-देन दर्ज)*\n"
+                f"⚠️ *Stock Adjustment Recorded (स्टॉक समायोजन)*\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"🧾 *Txn ID:* `{txn_id}`\n"
+                f"{items_desc}\n"
+                f"📊 *Remaining Stock:* {stock_info or 'Updated'}\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"Inventory updated with damage/adjustment movement."
+            )
+        elif txn.intent == TransactionIntent.PRODUCTION_LOG:
+            items_desc = "\n".join([f"• *{it.item_name}:* +{it.quantity:.0f} {it.unit}" for it in line_items])
+            inv_map = self.inventory.get(tenant_id, {})
+            stock_info = ", ".join([f"{inv_map[it.sku_id].current_stock:.0f} {it.unit}" for it in line_items if it.sku_id in inv_map])
+            success_text = (
+                f"✅ *Transaction Recorded (लेन-देन दर्ज)*\n"
+                f"🏭 *Daily Production Logged (दैनिक उत्पादन दर्ज)*\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"🧾 *Txn ID:* `{txn_id}`\n"
+                f"{items_desc}\n"
+                f"📊 *Current Stock Balance:* {stock_info or 'Updated'}\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"Production movement recorded with audit trail."
+            )
+        else:
+            items_desc = "\n".join([f"• {it.quantity:.0f}x {it.item_name} @ ₹{it.unit_price:.2f} = ₹{it.subtotal:.2f}" for it in line_items])
+            success_text = (
+                f"✅ *Transaction Recorded (लेन-देन दर्ज)*\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"🧾 *Txn ID:* `{txn_id}`\n"
+                f"👤 *Party:* {txn.party_name}\n"
+                f"{items_desc}\n\n"
+                f"💰 *Total:* ₹{total_amount:,.2f}\n"
+                f"💵 *Settled:* ₹{settled_val:,.2f}\n"
+                f"📒 *Udhaar Added:* ₹{udhaar_val:,.2f}\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"Digital ledger updated."
+            )
 
         return OutboundMessage(
             recipient_phone=recipient_phone,
@@ -510,20 +618,107 @@ class AgentOrchestrator:
                 party_name = p.display_name
                 break
 
-        # Check production intent
-        if any(w in t for w in ("banayi", "production", "manufactured", "produce")):
-            intent = TransactionIntent.PRODUCTION_LOG
-            # match quantity and item
-            qty_match = re.search(r"(\d+)\s*(cotton shirts?|shirts?|kurtas?|pieces?)", t)
-            qty = float(qty_match.group(1)) if qty_match else 50.0
-            item_name = "Cotton Shirt (L)"
-            unit_price = 200.0
+        # 1. Check Inventory Catalog Setup Intent (FR-01)
+        if any(w in t for w in ("add item", "add sku", "naya item", "naya maal", "item add", "kotha saraku", "nayi item")):
+            intent = TransactionIntent.INVENTORY_SETUP
+            qty_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:pieces|pcs|meters|m|kg|boxes|units)?", t)
+            quantity = float(qty_match.group(1)) if qty_match else 0.0
+
+            price_match = re.search(r"(?:@|rate|price|rs\.?|₹)\s*(\d+(?:\.\d+)?)", t)
+            unit_price = float(price_match.group(1)) if price_match else 200.0
+
+            reorder_match = re.search(r"(?:reorder|alert|minimum)\s*(?:level|at)?\s*(\d+(?:\.\d+)?)", t)
+            reorder_level = float(reorder_match.group(1)) if reorder_match else 20.0
+
+            clean_name = t
+            for phrase in ("naya item add karo", "naya item add", "add item", "add sku", "naya maal add karo", "naya maal add", "naya maal", "item add", "kotha saraku", "nayi item"):
+                clean_name = clean_name.replace(phrase, "")
+            clean_name = re.sub(r"(?:@|rate|price|rs\.?|₹)\s*\d+(?:\.\d+)?", "", clean_name)
+            clean_name = re.sub(r"(?:reorder|alert|minimum)\s*(?:level|at)?\s*\d+(?:\.\d+)?", "", clean_name)
+            clean_name = re.sub(r"\d+(?:\.\d+)?\s*(?:pieces|pcs|meters|m|kg|boxes|units)?", "", clean_name)
+            clean_name = re.sub(r"[^a-zA-Z\s]", "", clean_name).strip()
+            item_name = clean_name.title() if clean_name else "New Product"
+
+            clean_slug = re.sub(r"[^a-zA-Z0-9]+", "-", item_name.lower()).strip("-")
+            sku_id = clean_slug or f"sku-{uuid.uuid4().hex[:6]}"
+
             line_items = [
                 LineItem(
-                    sku_id="shirt-cotton-l",
+                    sku_id=sku_id,
+                    item_name=item_name,
+                    quantity=quantity,
+                    unit="pieces",
+                    unit_price=unit_price,
+                    subtotal=quantity * unit_price,
+                )
+            ]
+            total_amount = quantity * unit_price
+            payments = [PaymentNode(method=PaymentMethod.CASH, amount=total_amount, status=PaymentStatus.SETTLED)]
+            return intent, "Catalog Administration", line_items, payments, total_amount, 0.95
+
+        # 2. Check Stock Adjustment / Damage Intent (FR-01)
+        if any(w in t for w in ("kharab", "damage", "wastage", "nuksan", "lost", "shrinkage", "nastalau")):
+            intent = TransactionIntent.INVENTORY_ADJUSTMENT
+            qty_match = re.search(r"(\d+(?:\.\d+)?)", t)
+            quantity = float(qty_match.group(1)) if qty_match else 1.0
+
+            resolved_sku, matched_item, conf = self.inventory_service.resolve_sku(tenant_id, t)
+            if matched_item:
+                sku_id = matched_item.sku_id
+                item_name = matched_item.item_name
+                unit_price = matched_item.default_unit_price
+                unit = matched_item.unit
+                confidence = 0.95
+            else:
+                sku_id = "shirt-cotton-l"
+                item_name = "Cotton Shirt (L)"
+                unit_price = 200.0
+                unit = "pieces"
+                confidence = 0.85
+
+            line_items = [
+                LineItem(
+                    sku_id=sku_id,
+                    item_name=item_name,
+                    quantity=quantity,
+                    unit=unit,
+                    unit_price=unit_price,
+                    subtotal=quantity * unit_price,
+                )
+            ]
+            total_amount = quantity * unit_price
+            payments = [PaymentNode(method=PaymentMethod.CASH, amount=total_amount, status=PaymentStatus.SETTLED)]
+            return intent, "Internal Stock Adjustment", line_items, payments, total_amount, confidence
+
+        # 3. Check Production Intent (FR-01)
+        if any(w in t for w in ("banayi", "banaya", "production", "manufactured", "produce", "thayaru")):
+            intent = TransactionIntent.PRODUCTION_LOG
+            qty_match = re.search(r"(\d+(?:\.\d+)?)", t)
+            qty = float(qty_match.group(1)) if qty_match else 50.0
+
+            resolved_sku, matched_item, conf = self.inventory_service.resolve_sku(tenant_id, t)
+            if matched_item:
+                sku_id = matched_item.sku_id
+                item_name = matched_item.item_name
+                unit_price = matched_item.default_unit_price
+                unit = matched_item.unit
+                confidence = 0.95
+            else:
+                # Unknown SKU detected in production -> trigger Safety Gate for confirmation
+                name_match = re.search(r"\d+\s*([a-zA-Z\s]+?)(?:banayi|banaya|produce|manufacture|thayaru|in workshop|workshop)", t)
+                extracted_name = name_match.group(1).strip().title() if name_match else "Uncataloged Item"
+                sku_id = re.sub(r"[^a-zA-Z0-9]+", "-", extracted_name.lower()).strip("-") or "item-uncataloged"
+                item_name = extracted_name
+                unit_price = 200.0
+                unit = "pieces"
+                confidence = 0.70  # Below 0.85 threshold to trigger Safety Gate
+
+            line_items = [
+                LineItem(
+                    sku_id=sku_id,
                     item_name=item_name,
                     quantity=qty,
-                    unit="pieces",
+                    unit=unit,
                     unit_price=unit_price,
                     subtotal=qty * unit_price,
                 )
@@ -616,33 +811,49 @@ class AgentOrchestrator:
                 parties[txn.party_id].current_udhaar_balance += udhaar_amount
                 parties[txn.party_id].last_txn_at = datetime.now(timezone.utc)
 
-        # 2. Update inventory stock
-        inv_map = self.inventory.get(merchant_id, {})
+        # 2. Update inventory stock via dedicated InventoryService (FR-01 & FR-02)
         for item in txn.line_items:
             sku = item.sku_id or "shirt-cotton-l"
-            if sku in inv_map:
-                inv_item = inv_map[sku]
-                if txn.intent == TransactionIntent.PRODUCTION_LOG:
-                    inv_item.current_stock += item.quantity
-                    mov_type = MovementType.PRODUCTION_ADD
-                else:
-                    inv_item.current_stock -= item.quantity
-                    mov_type = MovementType.SALE_DEDUCT
-
-                inv_item.updated_at = datetime.now(timezone.utc)
-
-                movement = InventoryMovement(
-                    movement_id=f"mov_{uuid.uuid4().hex[:8]}",
+            if txn.intent == TransactionIntent.INVENTORY_SETUP:
+                self.inventory_service.create_or_update_item(
+                    merchant_id=merchant_id,
+                    item_name=item.item_name,
+                    sku_id=sku,
+                    unit=item.unit,
+                    default_unit_price=item.unit_price,
+                    initial_stock=item.quantity,
+                )
+            elif txn.intent == TransactionIntent.INVENTORY_ADJUSTMENT:
+                self.inventory_service.record_adjustment(
                     merchant_id=merchant_id,
                     sku_id=sku,
-                    movement_type=mov_type,
-                    quantity=item.quantity if mov_type == MovementType.PRODUCTION_ADD else -item.quantity,
-                    balance_after=inv_item.current_stock,
+                    quantity_delta=-item.quantity,
+                    reason="Damage/Wastage",
                     reference_txn_id=txn.txn_id,
                 )
-                if merchant_id not in self.movements:
-                    self.movements[merchant_id] = []
-                self.movements[merchant_id].append(movement)
+            elif txn.intent == TransactionIntent.PRODUCTION_LOG:
+                if sku not in self.inventory.get(merchant_id, {}):
+                    self.inventory_service.create_or_update_item(
+                        merchant_id=merchant_id,
+                        item_name=item.item_name,
+                        sku_id=sku,
+                        unit=item.unit,
+                        default_unit_price=item.unit_price,
+                        initial_stock=0.0,
+                    )
+                self.inventory_service.record_production(
+                    merchant_id=merchant_id,
+                    sku_id=sku,
+                    quantity=item.quantity,
+                    reference_txn_id=txn.txn_id,
+                )
+            else:
+                self.inventory_service.record_sale_deduction(
+                    merchant_id=merchant_id,
+                    sku_id=sku,
+                    quantity=item.quantity,
+                    reference_txn_id=txn.txn_id,
+                )
 
     def _init_tenant(self, tenant_id: str, sender_name: Optional[str] = None):
         """Initializes a new merchant tenant with standard defaults."""

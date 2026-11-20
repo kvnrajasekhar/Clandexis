@@ -19,6 +19,8 @@ class TransactionIntent(str, Enum):
     PURCHASE_ENTRY = "PURCHASE_ENTRY"
     UDHAAR_COLLECTION = "UDHAAR_COLLECTION"
     ANALYTICS_QUERY = "ANALYTICS_QUERY"
+    INVENTORY_SETUP = "INVENTORY_SETUP"
+    INVENTORY_ADJUSTMENT = "INVENTORY_ADJUSTMENT"
     EXPENSE = "EXPENSE"
     UNKNOWN = "UNKNOWN"
 
@@ -40,6 +42,8 @@ class MovementType(str, Enum):
     SALE_DEDUCT = "SALE_DEDUCT"
     RETURN_ADD = "RETURN_ADD"
     ADJUSTMENT = "ADJUSTMENT"
+    DAMAGE_WASTAGE = "DAMAGE_WASTAGE"
+    AUDIT_ADJUSTMENT = "AUDIT_ADJUSTMENT"
 
 
 class PaymentMethod(str, Enum):
@@ -93,6 +97,7 @@ class Merchant(BaseModel):
     owner_name: str = Field(..., description="Proprietor name")
     preferred_lang: str = Field(default="hi", description="Language code: hi (Hindi), te (Telugu), en")
     high_credit_threshold: float = Field(default=5000.0, description="Threshold triggering safety gate (₹)")
+    allow_negative_stock: bool = Field(default=True, description="Whether negative inventory balances are permitted with warning")
     whatsapp_phone_number_id: Optional[str] = Field(None, description="Meta Cloud API Phone Number ID")
     whatsapp_verified_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
