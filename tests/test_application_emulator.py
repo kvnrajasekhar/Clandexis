@@ -327,3 +327,54 @@ def test_mapped_voice_to_gemini_and_confirmation(app_client, db, mid, monkeypatc
     assert signed_callback(client, payload).json()["messages_received"] == 1
     assert "resend" in meta.sent[-1].text_content
     assert len(generated) == 1 and count(db, mid, "transaction_candidates") == 1
+
+
+def text_callback(client, sender, text, event):
+    return signed_callback(client, {"object": "whatsapp_business_account", "entry": [{
+        "id": "waba", "changes": [{"field": "messages", "value": {
+            "messaging_product": "whatsapp", "metadata": {
+                "display_phone_number": "15551737641", "phone_number_id": "phone"},
+            "messages": [{"from": sender.lstrip("+"), "id": event,
+                          "timestamp": "1795132800", "type": "text", "text": {"body": text}}]
+        }}]}]})
+
+
+def test_incident_telugu_review_confirm_and_report_read_only(app_client, db, mid, monkeypatch):
+    from types import SimpleNamespace
+    import agent_orchestrator.orchestrator as orchestrator
+    from app.pipeline import PipelineService
+    from app.schemas.transaction import ExtractionResponse, TransactionCandidate
+    client, sender, root = app_client
+    seed_party(db, mid, "raju", "Raju", ["Raju"], 0)
+    pipeline = PipelineService.__new__(PipelineService)
+    from app.services.input_processor import InputProcessor
+    from app.services.validator import BusinessValidator
+    pipeline.input_processor = InputProcessor()
+    pipeline.validator = BusinessValidator()
+    incomplete = TransactionCandidate(transaction_type="sale", buyer_name="Raju",
+        items=[{"item_name": "Cotton Shirt", "quantity": 10}],
+        raw_transcript="Nenu Raju ki 10 shirts sell chesanu", needs_clarification=True,
+        clarification_question="Okkokka shirt price entha? Payment cash, UPI, leka udhaar aa?")
+    complete = sale(qty=10, price=200, cash=0, upi=500, credit=1500, buyer="Raju")
+    extracts = iter([incomplete, complete])
+    pipeline.interpreter = SimpleNamespace(interpret=lambda **kw: ExtractionResponse(transactions=[next(extracts)]))
+    monkeypatch.setattr(orchestrator, "pipeline", pipeline)
+    for report in ["PDF ledgers kavali", "pdf ledger kavali"]:
+        assert text_callback(client, mid, report, report).status_code == 200
+        assert "Nothing posted" in sender.sent[-1].text_content
+    assert count(db, mid, "transaction_candidates") == count(db, mid, "transactions") == 0
+    text_callback(client, mid, "Nenu Raju ki 10 shirts sell chesanu", "wamid.raju.original")
+    assert sender.sent[-1].message_type == MessageType.TEXT and not sender.sent[-1].buttons
+    candidate, = col(db, mid, "transaction_candidates").stream()
+    assert candidate.to_dict()["extracted_snapshot"]["buyer_name"] == "Raju"
+    callback(client, mid, candidate.id, "wamid.premature")
+    assert count(db, mid, "transactions") == 0
+    text_callback(client, mid, "200 each, 500 UPI, 1500 udhaar", "wamid.raju.details")
+    assert sender.sent[-1].buttons[0].id == button_id(candidate.id, "confirm")
+    assert count(db, mid, "transactions") == 0
+    callback(client, mid, candidate.id, "wamid.raju.confirm")
+    callback(client, mid, candidate.id, "wamid.raju.confirm")
+    assert count(db, mid, "transactions") == 1 and stock(db, mid) == 290
+    assert ledger.get_party_balance(mid, "raju", db=db).outstanding == 1500
+    text_callback(client, mid, "PDF ledgers kavali", "wamid.report.after")
+    assert count(db, mid, "transactions") == 1 and stock(db, mid) == 290

@@ -27,9 +27,29 @@ def test_orchestrator_stages_without_claiming_commit(monkeypatch, status):
         assert "Transaction Rejected" in out.text_content
     else:
         assert len(ledger.rows) == 1
+        if status == "NEEDS_REVIEW":
+            assert not out.buttons and "Nothing posted" in out.text_content
+            return
         persisted = next(iter(ledger.rows))
         assert out.buttons[0].id == f"clx:v1:confirm:{persisted}"
         assert out.buttons[1].id == f"clx:v1:cancel:{persisted}"
         assert out.message_type == MessageType.INTERACTIVE_BUTTON
         assert "Nothing posted yet" in out.interactive_body
         assert "Recorded" not in out.interactive_body
+
+
+@pytest.mark.parametrize("intent", ["unknown", "query"])
+def test_non_financial_intents_never_stage(monkeypatch, intent):
+    import agent_orchestrator.orchestrator as orchestrator
+    import app.services.confirmation as confirmation
+    ledger = LedgerStub()
+    monkeypatch.setattr(confirmation, "_service", confirmation.ConfirmationService(ledger))
+    result = ProcessingResult(input_metadata=ProcessedInputPayload(
+        merchant_id="merchant", message_id="report", idempotency_key="report"),
+        extraction=ExtractionResponse(transactions=[candidate(transaction_type=intent)]))
+    monkeypatch.setattr(orchestrator, "pipeline", SimpleNamespace(process_and_interpret=lambda **kw: result))
+    _, out = orchestrator.orchestrate_inbound_message(InboundMessage(
+        message_id="report", tenant_id="merchant", sender_phone="merchant",
+        message_type=MessageType.TEXT, text_content="Unsupported request"))
+    assert not ledger.rows and ledger.post_count == 0
+    assert "Nothing posted" in out.text_content

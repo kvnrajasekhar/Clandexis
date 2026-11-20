@@ -16,7 +16,7 @@ def test_settings_loaded_from_env():
     assert settings.TTS_MODEL == "gemini-3.8-flash-tts"
     assert settings.ANALYST_MODEL == "gemini-4-carbon"
     assert settings.META_API_VERSION == "v21.0"
-    assert settings.META_VERIFY_TOKEN == os.getenv("META_VERIFY_TOKEN", "")
+    assert settings.META_VERIFY_TOKEN == os.environ.get("META_VERIFY_TOKEN", os.getenv("WHATSAPP_VERIFY_TOKEN", ""))
     assert isinstance(settings.PORT, int)
     assert isinstance(settings.CONFIDENCE_THRESHOLD, float)
     assert settings.CONFIDENCE_THRESHOLD == 0.85

@@ -1,5 +1,6 @@
 """Route replies before extraction; stage persisted candidates before approval."""
 import logging
+import re
 from app.schemas.transaction import ProcessingResult
 from app.services.confirmation import (
     AuthenticatedMerchant, ConfirmationError, PostingResult, button_id,
@@ -52,12 +53,28 @@ def orchestrate_inbound_message(message: InboundMessage, *, media_bytes: bytes |
     except ConfirmationError as exc:
         return None, OutboundMessage(recipient_phone=message.sender_phone, text_content=str(exc))
 
+    # Reporting requests must never enter financial extraction or clarify a sale.
+    if message.message_type == MessageType.TEXT and re.search(
+            r"\b(pdf|ledgers?|reports?)\b", message.text_content or "", re.IGNORECASE):
+        return None, OutboundMessage(recipient_phone=message.sender_phone,
+            text_content="Please use the authenticated dashboard for ledger reports and invoice downloads. Nothing posted.")
+    active = service.ledger.active_candidates(merchant.merchant_id, service.clock())
+    pending_review = [r for r in active if r.candidate.needs_clarification or r.candidate.requires_review]
+    if len(pending_review) > 1:
+        return None, OutboundMessage(recipient_phone=message.sender_phone,
+            text_content="Multiple candidates need review. Resolve the specific candidate in the dashboard. Nothing posted.")
+    reviewing = pending_review[0] if pending_review and message.message_type == MessageType.TEXT else None
+    raw_text = message.text_content
+    if reviewing:
+        raw_text = ("Clarify this same transaction using the merchant reply. Preserve buyer and items. "
+                    "Leave unstated price and payment details null. Ask for remaining missing details. "
+                    f"Current facts: {reviewing.candidate.model_dump_json()}\nMerchant reply: {message.text_content}")
     if pipeline is None:
         from app.pipeline import PipelineService
         pipeline = PipelineService()
     result = pipeline.process_and_interpret(
         merchant_id=message.tenant_id, message_id=message.message_id,
-        raw_text=message.text_content, media_path=message.media_url,
+        raw_text=raw_text, media_path=message.media_url,
         media_bytes=media_bytes, mime_type=(message.media_mime_type or "").split(";")[0].strip().lower() or None)
     if result.input_metadata.is_duplicate:
         return result, OutboundMessage(recipient_phone=message.sender_phone,
@@ -72,11 +89,22 @@ def orchestrate_inbound_message(message: InboundMessage, *, media_bytes: bytes |
         return result, OutboundMessage(recipient_phone=message.sender_phone,
                                        text_content="Please send one transaction at a time. Nothing posted.")
     tx = transactions[0]
+    if tx.transaction_type in ("query", "unknown"):
+        return result, OutboundMessage(recipient_phone=message.sender_phone,
+            text_content="This request cannot post a transaction. Use the dashboard for reports. Nothing posted.")
     if tx.validation_status == "REJECTED":
         return result, OutboundMessage(recipient_phone=message.sender_phone,
             text_content="❌ *Transaction Rejected*\n" + "\n".join(tx.validation_warnings))
     try:
-        row = service.stage(merchant, message.message_id, 0, tx)
+        if reviewing:
+            if tx.transaction_type != reviewing.candidate.transaction_type or tx.buyer_name != reviewing.candidate.buyer_name:
+                raise ConfirmationError("Reply changed the buyer or transaction type. Review the candidate in the dashboard.")
+            if tx.validation_status != "ACCEPTED" or tx.needs_clarification or tx.requires_review:
+                return result, OutboundMessage(recipient_phone=message.sender_phone,
+                    text_content=tx.clarification_question or "Price and payment details are still required. Nothing posted.")
+            row = service.resolve_review(merchant, reviewing.candidate_id, tx, message.text_content)
+        else:
+            row = service.stage(merchant, message.message_id, 0, tx)
         review = (row.candidate.validation_status == "NEEDS_REVIEW"
                   or row.candidate.needs_clarification or row.candidate.requires_review)
         body = (row.candidate.clarification_question or "Review these details before confirming.")
@@ -85,6 +113,8 @@ def orchestrate_inbound_message(message: InboundMessage, *, media_bytes: bytes |
         body += f"Candidate: {row.candidate_id}\nNothing posted yet."
         if review:
             body += "\nCorrection or explicit review and revalidation is required before Confirm can post."
+        if review:
+            return result, OutboundMessage(recipient_phone=message.sender_phone, text_content=body)
         return result, OutboundMessage(
             recipient_phone=message.sender_phone, message_type=MessageType.INTERACTIVE_BUTTON,
             interactive_header="Clarification Required" if review else "Confirm Transaction",

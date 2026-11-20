@@ -125,6 +125,14 @@ class BusinessValidator:
                 )
                 is_rejected = True
 
+        if tx.transaction_type in [TransactionType.SALE, TransactionType.PURCHASE]:
+            if not tx.items or any(i.unit_price is None for i in tx.items):
+                tx.needs_clarification = True
+                requires_review = True
+                warnings.append("Missing item price. Merchant clarification required.")
+                if not tx.clarification_question:
+                    tx.clarification_question = "What is the item price and how was payment settled?"
+
         # --- Rule 6: Missing payment info vs Assumed Credit Check ---
         # If sale/purchase has total_amount but NO payments mentioned AND no explicit credit stated:
         if tx.transaction_type in [TransactionType.SALE, TransactionType.PURCHASE]:
@@ -147,13 +155,13 @@ class BusinessValidator:
             buyer_lower = (tx.buyer_name or "").lower()
             supp_lower = (tx.supplier_name or "").lower()
 
-            if m_lower in buyer_lower or buyer_lower in m_lower:
+            if buyer_lower and (m_lower in buyer_lower or buyer_lower in m_lower):
                 # Logged in merchant is the BUYER, so from their perspective it's a PURCHASE
                 if tx.transaction_type == TransactionType.SALE:
                     warnings.append(f"Merchant '{current_merchant_id_or_name}' identified as Buyer. Adjusted transaction_type from 'sale' to 'purchase'.")
                     tx.transaction_type = TransactionType.PURCHASE
                     requires_review = True
-            elif m_lower in supp_lower or supp_lower in m_lower:
+            elif supp_lower and (m_lower in supp_lower or supp_lower in m_lower):
                 # Logged in merchant is the SUPPLIER, so it is a SALE
                 if tx.transaction_type == TransactionType.PURCHASE:
                     warnings.append(f"Merchant '{current_merchant_id_or_name}' identified as Supplier. Adjusted transaction_type from 'purchase' to 'sale'.")
