@@ -520,7 +520,7 @@ export default function App() {
                 <tbody className="divide-y divide-slate-800">
                   {candidates.map((c) => (
                     <tr key={c.candidate_id} className="hover:bg-slate-800/40">
-                      <td className="p-3 font-mono text-[11px] text-slate-400">{c.candidate_id.substring(0, 16)}...</td>
+                      <td className="p-3 font-mono text-[11px] text-slate-400">{c.candidate_id}</td>
                       <td className="p-3 font-semibold text-white">{c.extracted_snapshot?.buyer_name || 'N/A'}</td>
                       <td className="p-3 font-bold">₹{c.extracted_snapshot?.total_amount || 0}</td>
                       <td className="p-3 text-[11px] text-slate-400">
@@ -682,6 +682,12 @@ export default function App() {
                   <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
                     Extraction & Validation Response
                   </h3>
+                  {demoResult.staged_candidates?.map(row => (
+                    <div key={row.candidate_id} className="mb-2 text-sm">
+                      <code>{row.candidate_id}</code> · {row.validation_status} · {row.posting_status}
+                      <button className="ml-3 underline text-sky-300" onClick={() => setActiveTab('candidates')}>View candidates</button>
+                    </div>
+                  ))}
                   <pre className="p-4 bg-slate-950 rounded-lg border border-slate-800 text-[11px] text-emerald-400 overflow-x-auto font-mono max-h-96">
                     {JSON.stringify(demoResult, null, 2)}
                   </pre>

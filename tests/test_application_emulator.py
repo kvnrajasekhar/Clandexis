@@ -212,3 +212,27 @@ def test_dashboard_review_revalidates_without_posting(app_client, db, mid):
     response = client.post(url, json={"candidate":sale().model_dump(mode="json"), "note":"Checked payment against bill"})
     assert response.status_code == 200 and response.json()["review_resolved"]
     assert count(db, mid, "transactions") == 0
+
+
+def test_browser_extraction_receipt_matches_persisted_candidate(app_client, db, mid, monkeypatch):
+    """Fixture only at the model boundary. Validator, HTTP, staging and Firestore are real."""
+    from app.api.v1 import endpoints
+    from app.pipeline import PipelineService
+    from app.schemas.transaction import ExtractionResponse
+    from app.services.interpreter import InterpreterService
+
+    monkeypatch.setattr(InterpreterService, "__init__", lambda self, model_name=None: None)
+    monkeypatch.setattr(InterpreterService, "interpret", lambda self, **kw:
+                        ExtractionResponse(transactions=[sale(cash=0, upi=2000, credit=8000)]))
+    monkeypatch.setattr(endpoints, "pipeline", PipelineService())
+    client, _, _ = app_client
+    sign_in(client)
+    payload = {"merchant_id": mid, "raw_text": "fixture sale", "stage": True}
+    response = client.post("/api/v1/extract/text", json=payload)
+    assert response.status_code == 200
+    [receipt] = response.json()["staged_candidates"]
+    row = col(db, mid, "transaction_candidates").document(receipt["candidate_id"]).get().to_dict()
+    assert receipt["validation_status"] == row["validation_status"] == "ACCEPTED"
+    assert receipt["posting_status"] == row["posting_status"] == "PENDING_CONFIRMATION"
+    assert count(db, mid, "transactions") == 0
+    assert row["source_channel"] == "dashboard"

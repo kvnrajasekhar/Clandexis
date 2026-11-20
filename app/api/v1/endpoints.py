@@ -1,3 +1,4 @@
+from datetime import timedelta
 import hashlib
 import os
 import shutil
@@ -8,6 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from app.services import ledger
 from app.pipeline import PipelineService
 from app.schemas.transaction import ProcessingResult
 from app.schemas.speech import TextToSpeechRequest, TextToSpeechResponse
@@ -24,16 +26,32 @@ def get_pipeline():
         pipeline = PipelineService()
     return pipeline
 
-from app.services.confirmation import AuthenticatedMerchant, get_confirmation_service
+class CandidateReceipt(BaseModel):
+    candidate_index: int
+    candidate_id: str
+    validation_status: str
+    posting_status: ledger.PostingStatus
 
 
-def stage_for_dashboard(result, identity):
-    if result.input_metadata.is_duplicate:
-        return
-    for index, candidate in enumerate(result.extraction.transactions):
-        if candidate.validation_status != "REJECTED" and candidate.transaction_type not in ("unknown", "query"):
-            get_confirmation_service().stage(AuthenticatedMerchant(identity.merchant_id),
-                result.input_metadata.idempotency_key, index, candidate)
+class DashboardExtractionResult(ProcessingResult):
+    staged_candidates: list[CandidateReceipt] = Field(default_factory=list)
+
+
+def dashboard_result(result: ProcessingResult, identity: SessionIdentity, stage: bool):
+    receipts = []
+    if stage and not result.input_metadata.is_duplicate:
+        for index, candidate in enumerate(result.extraction.transactions):
+            if candidate.validation_status == "REJECTED" or candidate.transaction_type in ("unknown", "query"):
+                continue
+            staged = ledger.stage_candidate(
+                identity.merchant_id, result.input_metadata.idempotency_key, candidate,
+                candidate_index=index, source_channel="dashboard",
+                source_media_type=result.input_metadata.media_type, ttl=timedelta(minutes=30),
+            )
+            receipts.append(CandidateReceipt(candidate_index=index, candidate_id=staged.candidate_id,
+                validation_status=staged.validation_status, posting_status=staged.posting_status))
+    return DashboardExtractionResult(input_metadata=result.input_metadata, extraction=result.extraction,
+                                     staged_candidates=receipts)
 
 
 class TextExtractionRequest(BaseModel):
@@ -43,7 +61,7 @@ class TextExtractionRequest(BaseModel):
     raw_text: str = Field(description="Merchant raw text message")
     merchant_business_name: Optional[str] = Field(default=None, description="Registered merchant business name")
 
-@router.post("/extract/text", response_model=ProcessingResult, summary="Extract & Validate Transaction from Text")
+@router.post("/extract/text", response_model=DashboardExtractionResult, summary="Extract & Validate Transaction from Text")
 async def extract_from_text(payload: TextExtractionRequest, identity: SessionIdentity = Depends(dashboard_identity)):
     """
     Process raw WhatsApp/SMS text message:
@@ -60,13 +78,11 @@ async def extract_from_text(payload: TextExtractionRequest, identity: SessionIde
             raw_text=payload.raw_text,
             merchant_business_name=payload.merchant_business_name,
         )
-        if payload.stage:
-            stage_for_dashboard(result, identity)
-        return result
+        return dashboard_result(result, identity, payload.stage)
     except Exception as e:
         raise HTTPException(status_code=500, detail="Processing unavailable")
 
-@router.post("/extract/media", response_model=ProcessingResult, summary="Extract & Validate Transaction from Audio, Image, or PDF")
+@router.post("/extract/media", response_model=DashboardExtractionResult, summary="Extract & Validate Transaction from Audio, Image, or PDF")
 async def extract_from_media(
     merchant_id: str = Form(...),
     message_id: Optional[str] = Form(None),
@@ -98,9 +114,7 @@ async def extract_from_media(
             media_path=tmp_path,
             merchant_business_name=merchant_business_name,
         )
-        if stage:
-            stage_for_dashboard(result, identity)
-        return result
+        return dashboard_result(result, identity, stage)
     except Exception as e:
         raise HTTPException(status_code=500, detail="Processing unavailable")
     finally:
