@@ -15,6 +15,7 @@ from fastapi.responses import PlainTextResponse
 
 from config import settings
 from models.canonical import InboundMessage, OutboundMessage
+from app.api.v1 import api_router
 from .meta_whatsapp_handler import MetaWhatsAppService
 from .security import verify_meta_signature
 
@@ -28,6 +29,9 @@ meta_service: Optional[MetaWhatsAppService] = None
 async def lifespan(app: FastAPI):
     global meta_service
     meta_service = MetaWhatsAppService()
+    from app.services.confirmation import configure_confirmation
+    from app.services.confirmation_ledger_adapter import ClaudeLedgerAdapter
+    configure_confirmation(ClaudeLedgerAdapter())
     logger.info("MetaWhatsAppService initialized.")
     yield
     if meta_service:
@@ -36,9 +40,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Clandexis Invisible ERP — Webhook Service",
-    description="WhatsApp Meta Cloud API Ingestion and Delivery Service",
-    version="1.0.0",
+    title="Clandexis Invisible ERP — Webhook & Dashboard API",
+    description="WhatsApp Meta Cloud API Ingestion, Ledger Operations & Judge Live Dashboard",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -49,6 +53,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount all /api/v1 endpoints including dashboard & multimodal extraction
+app.include_router(api_router, prefix="/api/v1")
+
+# Mount built React Vite dashboard static assets if present
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+
+dashboard_dist = Path(__file__).resolve().parent.parent / "dashboard" / "dist"
+if dashboard_dist.exists():
+    app.mount("/dashboard", StaticFiles(directory=str(dashboard_dist), html=True), name="dashboard")
+
 
 
 # ==============================================================================
@@ -135,7 +151,7 @@ async def process_inbound_message(message: InboundMessage):
     try:
         from agent_orchestrator import orchestrate_inbound_message
         result, outbound = orchestrate_inbound_message(message)
-        logger.info(f"Orchestration completed for {message.message_id}. Status: {result.extraction.transactions[0].validation_status if result.extraction.transactions else 'N/A'}")
+        logger.info("Orchestration completed for %s (%s)", message.message_id, type(result).__name__)
         
         # Dispatch WhatsApp reply back to user
         if meta_service:
