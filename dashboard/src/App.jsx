@@ -286,7 +286,7 @@ export default function App() {
       />
 
       {/* Main Content View */}
-      <main className="flex-1 p-6 max-w-7xl w-full mx-auto space-y-6">
+      <main className="flex-1 p-3 sm:p-5 md:p-6 max-w-7xl w-full mx-auto space-y-4 sm:space-y-6">
         {activeTab === 'overview' && (
           <OverviewTab
             summary={summary}

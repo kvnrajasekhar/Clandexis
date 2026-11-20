@@ -44,8 +44,8 @@ export default function OnboardingModal({ session, onComplete, onCancel }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm grid place-items-center p-4">
-      <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-6 sm:p-8 space-y-6 text-left relative animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm grid place-items-center p-3 sm:p-4 overflow-y-auto">
+      <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-5 sm:p-8 space-y-5 text-left relative my-auto max-h-[92vh] overflow-y-auto animate-in fade-in duration-200">
         {/* Header / Intro */}
         <div className="flex items-start gap-4">
           {session?.picture ? (
