@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from config import settings
-from models.canonical import CanonicalButton, ChannelType, InboundMessage, MessageType, OutboundMessage
+from models.canonical import CanonicalButton, CanonicalListRow, CanonicalListSection, ChannelType, InboundMessage, MessageType, OutboundMessage
 from models.whatsapp_meta import (
     MetaInteractiveAction,
     MetaInteractiveBody,
@@ -19,6 +19,8 @@ from models.whatsapp_meta import (
     MetaInteractiveFooter,
     MetaInteractiveHeader,
     MetaInteractivePayload,
+    MetaInteractiveRow,
+    MetaInteractiveSection,
     MetaMediaPayload,
     MetaMessage,
     MetaMessageType,
@@ -330,6 +332,17 @@ class MetaWhatsAppService:
                 header_text=message.interactive_header,
                 footer_text=message.interactive_footer,
             )
+
+        # 2. Interactive List Card (e.g. 10 Indian Languages picker)
+        elif (message.message_type == MessageType.INTERACTIVE_LIST or message.list_sections) and message.list_sections:
+            return await self.send_interactive_list(
+                to=to_phone,
+                body_text=message.interactive_body or message.text_content or "Please select an option:",
+                button_text=message.list_button_text or "Select Option 🔽",
+                sections=message.list_sections,
+                header_text=message.interactive_header,
+                footer_text=message.interactive_footer,
+            )
             
         elif message.message_type == MessageType.DOCUMENT and message.document_url:
             return await self.send_document_message(
@@ -395,6 +408,58 @@ class MetaWhatsAppService:
                 body=MetaInteractiveBody(text=body_text[:1024]),
                 footer=MetaInteractiveFooter(text=footer_text[:60]) if footer_text else None,
                 action=MetaInteractiveAction(buttons=meta_buttons),
+            ),
+        )
+        return await self._post_message(payload)
+
+    async def send_interactive_list(
+        self,
+        to: str,
+        body_text: str,
+        button_text: str,
+        sections: List[CanonicalListSection],
+        header_text: Optional[str] = None,
+        footer_text: Optional[str] = "Clandexis Invisible ERP",
+    ) -> Optional[MetaSendResponse]:
+        """
+        Sends native WhatsApp Interactive List (supports up to 10 rows across sections).
+        Ideal for choosing from all major Indian commercial languages in a single native bottom sheet!
+        """
+        meta_sections = []
+        total_rows = 0
+        for sec in sections:
+            rows = []
+            for r in sec.rows:
+                if total_rows >= 10:
+                    break
+                rows.append(MetaInteractiveRow(
+                    id=r.id,
+                    title=r.title[:24],
+                    description=r.description[:72] if r.description else None,
+                ))
+                total_rows += 1
+            if rows:
+                meta_sections.append(MetaInteractiveSection(
+                    title=sec.title[:24] if sec.title else None,
+                    rows=rows,
+                ))
+            if total_rows >= 10:
+                break
+
+        payload = MetaSendMessageRequest(
+            messaging_product="whatsapp",
+            recipient_type="individual",
+            to=to.replace("+", ""),
+            type=MetaMessageType.INTERACTIVE,
+            interactive=MetaInteractivePayload(
+                type="list",
+                header=MetaInteractiveHeader(type="text", text=header_text[:60]) if header_text else None,
+                body=MetaInteractiveBody(text=body_text[:1024]),
+                footer=MetaInteractiveFooter(text=footer_text[:60]) if footer_text else None,
+                action=MetaInteractiveAction(
+                    button=button_text[:20],
+                    sections=meta_sections,
+                ),
             ),
         )
         return await self._post_message(payload)

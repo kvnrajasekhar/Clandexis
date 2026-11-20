@@ -96,7 +96,7 @@ class BusinessValidator:
                 warnings.append(
                     f"Subtotal ({sub_dec}) + Tax ({tax_dec}) - Discount ({disc_dec}) = {expected_tot}, but total_amount is {actual_tot}."
                 )
-                is_rejected = True
+                requires_review = True
 
         # --- Rule 5: Payments & Overpayment Check ---
         paid_from_payments = sum((_m(p.amount) for p in tx.payments), Decimal("0"))

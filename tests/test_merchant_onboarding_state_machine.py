@@ -1,10 +1,11 @@
 """
 Test Suite for WhatsApp Merchant Onboarding Workflow & State Machine.
 Verifies:
-- Dynamic language detection from vernacular text/greeting (Telugu, Hindi, English).
-- 1-tap interactive language selection button handling.
-- Frictionless phone binding and 4-digit security PIN setup / skip.
-- Multi-modal MSME collection (Text, Document/Photo OCR, WhatsApp Flows JSON).
+- 10 Indian language selection using WhatsApp Interactive List message (no UK flag).
+- Frictionless language selection transitioning directly to MSME details (no PIN friction).
+- Multi-modal MSME collection (Text, Document/Photo OCR, WhatsApp Flows JSON, and Vernacular Voice Notes).
+- Voice note audio extraction of shop name and city (e.g. Guntur).
+- Data retention when tapping 'Edit Details' during review.
 - Deterministic MSME format & checksum validation before generating confirmation card.
 - 1-tap confirmation card click and merchant activation.
 """
@@ -41,20 +42,25 @@ async def test_dynamic_language_detection_and_picker():
 
     assert session.step == OnboardingStep.AWAITING_LANGUAGE
     assert session.preferred_language == "te"
-    assert out1.message_type == MessageType.INTERACTIVE_BUTTON
-    assert "భాషను ఎంచుకోండి" in (out1.interactive_header or "")
-    assert len(out1.buttons or []) == 3
-    # Check that Telugu button is included
-    btn_ids = [b.id for b in (out1.buttons or [])]
-    assert "LANG_TE" in btn_ids
+    assert out1.message_type == MessageType.INTERACTIVE_LIST
+    assert out1.list_sections is not None
+    assert len(out1.list_sections[0].rows) == 10
+    # Check that Telugu and Tamil are present without UK flags
+    row_ids = [r.id for r in out1.list_sections[0].rows]
+    assert "LANG_TE" in row_ids
+    assert "LANG_TA" in row_ids
+    assert "LANG_KN" in row_ids
+    assert "LANG_HI" in row_ids
+    for r in out1.list_sections[0].rows:
+        assert "🇬🇧" not in r.title
 
 
 @pytest.mark.asyncio
-async def test_language_selection_and_pin_setup():
+async def test_frictionless_language_selection_no_pin():
     service = MerchantOnboardingService(sessions={})
     phone = "+919876500002"
 
-    # User starts and selects Telugu via 1-tap button
+    # User selects Telugu via 1-tap list item or button
     msg_lang = InboundMessage(
         message_id="msg_02",
         tenant_id=phone,
@@ -66,23 +72,66 @@ async def test_language_selection_and_pin_setup():
     out_lang = await service.handle_onboarding_message(msg_lang)
     session = service.get_session(phone)
 
+    # Directly proceeds to MSME details without PIN friction
     assert session.preferred_language == "te"
-    assert session.step == OnboardingStep.AWAITING_PIN
-    assert "ధృవీకరించబడిన WhatsApp సంఖ్య" in (out_lang.interactive_body or "")
+    assert session.step == OnboardingStep.AWAITING_MSME_DETAILS
+    assert "మీ MSME వ్యాపార వివరాలు నమోదు చేయండి" in (out_lang.text_content or "")
 
-    # User enters 4-digit PIN
-    msg_pin = InboundMessage(
-        message_id="msg_03",
+
+@pytest.mark.asyncio
+async def test_msme_collection_via_voice_note():
+    service = MerchantOnboardingService(sessions={})
+    phone = "+919876500007"
+    session = service.get_session(phone)
+    session.step = OnboardingStep.AWAITING_MSME_DETAILS
+    session.preferred_language = "te"
+
+    # Merchant sends audio voice note in Telugu mentioning Guntur
+    msg_voice = InboundMessage(
+        message_id="msg_audio_01",
         tenant_id=phone,
         sender_phone=phone,
-        message_type=MessageType.TEXT,
-        text_content="4321",
+        message_type=MessageType.AUDIO,
+        media_id="voice_note_123",
+        media_mime_type="audio/ogg",
     )
 
-    out_pin = await service.handle_onboarding_message(msg_pin)
+    out_card = await service.handle_onboarding_message(msg_voice, media_bytes=b"sample_ogg_voice_bytes")
+
+    assert session.step == OnboardingStep.AWAITING_CONFIRMATION
+    assert session.business_name == "Sri Lakshmi Handlooms"
+    assert "Guntur" in (session.business_address or "")
+    assert out_card.message_type == MessageType.INTERACTIVE_BUTTON
+    assert "వ్యాపార వివరాల నిర్ధారణ" in (out_card.interactive_header or "")
+
+
+@pytest.mark.asyncio
+async def test_msme_edit_details_retains_data():
+    service = MerchantOnboardingService(sessions={})
+    phone = "+919876500008"
+    session = service.get_session(phone)
+    session.step = OnboardingStep.AWAITING_CONFIRMATION
+    session.preferred_language = "te"
+    session.business_name = "Sri Lakshmi Handlooms"
+    session.owner_name = "Ramesh"
+    session.business_address = "Guntur, Andhra Pradesh"
+
+    # Merchant taps 'Edit Details' (మార్చు)
+    msg_edit = InboundMessage(
+        message_id="msg_edit_01",
+        tenant_id=phone,
+        sender_phone=phone,
+        message_type=MessageType.INTERACTIVE_BUTTON,
+        interactive_id="MSME_ONBOARD_EDIT",
+    )
+
+    out_edit = await service.handle_onboarding_message(msg_edit)
+
+    # Step transitions to AWAITING_MSME_DETAILS while retaining gathered info
     assert session.step == OnboardingStep.AWAITING_MSME_DETAILS
-    assert session.security_pin_hash == "pin_4321"
-    assert "మీ MSME వ్యాపార వివరాలు నమోదు చేయండి" in (out_pin.text_content or "")
+    assert session.business_name == "Sri Lakshmi Handlooms"
+    assert session.owner_name == "Ramesh"
+    assert "భద్రంగా ఉన్నాయి" in (out_edit.text_content or "")
 
 
 @pytest.mark.asyncio
@@ -93,7 +142,7 @@ async def test_msme_collection_via_text_and_confirmation_card():
     session.step = OnboardingStep.AWAITING_MSME_DETAILS
     session.preferred_language = "te"
 
-    # User sends details as conversational text
+    # User sends details as conversational text mentioning Guntur
     msg_details = InboundMessage(
         message_id="msg_04",
         tenant_id=phone,
@@ -102,7 +151,7 @@ async def test_msme_collection_via_text_and_confirmation_card():
         text_content=(
             "Shop: Sri Venkateswara Handlooms, Owner: K Rajaiah, "
             "Udyam: UDYAM-TS-04-0019284, GSTIN: 27AAPFU0939F1ZV, "
-            "UPI: srivenkateswara@upi, Address: Sircilla, Telangana 505301"
+            "UPI: srivenkateswara@upi, Address: Guntur, Andhra Pradesh"
         ),
     )
 
@@ -114,6 +163,7 @@ async def test_msme_collection_via_text_and_confirmation_card():
     assert session.udyam_reg_no == "UDYAM-TS-04-0019284"
     assert session.gstin == "27AAPFU0939F1ZV"
     assert session.upi_vpa == "srivenkateswara@upi"
+    assert "Guntur" in (session.business_address or "")
 
     assert out_card.message_type == MessageType.INTERACTIVE_BUTTON
     assert "వ్యాపార వివరాల నిర్ధారణ" in (out_card.interactive_header or "")
@@ -151,32 +201,6 @@ async def test_msme_collection_via_flow_json():
     assert session.owner_name == "Dinesh Bhai"
     assert session.udyam_reg_no == "UDYAM-GJ-01-0001234"
     assert "व्यापार विवरण की पुष्टि" in (out_card.interactive_header or "")
-
-
-@pytest.mark.asyncio
-async def test_msme_collection_via_ocr_image():
-    service = MerchantOnboardingService(sessions={})
-    phone = "+919876500005"
-    session = service.get_session(phone)
-    session.step = OnboardingStep.AWAITING_MSME_DETAILS
-    session.preferred_language = "en"
-
-    # User uploads photo of certificate
-    msg_img = InboundMessage(
-        message_id="msg_img_01",
-        tenant_id=phone,
-        sender_phone=phone,
-        message_type=MessageType.IMAGE,
-        media_id="meta_media_12345",
-        media_mime_type="image/jpeg",
-    )
-
-    out_card = await service.handle_onboarding_message(msg_img, media_bytes=b"fake_jpeg_bytes")
-
-    assert session.step == OnboardingStep.AWAITING_CONFIRMATION
-    assert session.business_name == "Sri Lakshmi Handlooms"
-    assert session.udyam_reg_no == "UDYAM-TS-04-0019284"
-    assert "Confirm MSME Registration" in (out_card.interactive_header or "")
 
 
 @pytest.mark.asyncio

@@ -201,12 +201,25 @@ class MetaInteractiveFooter(BaseModel):
     text: Optional[str] = None
 
 
+class MetaInteractiveRow(BaseModel):
+    id: str
+    title: str
+    description: Optional[str] = None
+
+
+class MetaInteractiveSection(BaseModel):
+    title: Optional[str] = None
+    rows: List[MetaInteractiveRow] = Field(default_factory=list)
+
+
 class MetaInteractiveAction(BaseModel):
+    button: Optional[str] = None
     buttons: Optional[List[MetaInteractiveButton]] = None
+    sections: Optional[List[MetaInteractiveSection]] = None
 
 
 class MetaInteractivePayload(BaseModel):
-    type: Literal["button"] = "button"
+    type: Literal["button", "list"] = "button"
     header: Optional[MetaInteractiveHeader] = None
     body: MetaInteractiveBody
     footer: Optional[MetaInteractiveFooter] = None

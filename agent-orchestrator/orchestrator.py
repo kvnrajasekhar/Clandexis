@@ -74,9 +74,27 @@ def orchestrate_inbound_message(
 
     durable_processing = conversation is not None
     conversation = conversation if conversation is not None else {}
-    from app.services.conversation_language import preference, question
+    from app.services.conversation_language import preference, question, SUPPORTED_LANGUAGES
 
     language, script = preference(message.text_content or "", conversation)
+
+    # If message has no text (e.g. voice note/image) or language is default, hydrate from merchant profile in DB
+    if not message.text_content or conversation.get("detected_language") in (None, "en"):
+        from config import settings
+        if settings.DATABASE_BACKEND == "postgres" and settings.DATABASE_URL:
+            try:
+                import psycopg
+                with psycopg.connect(settings.DATABASE_URL, connect_timeout=3) as conn:
+                    row = conn.execute(
+                        "SELECT preferred_language, script_preference FROM merchants WHERE phone_e164 = %s LIMIT 1",
+                        (message.sender_phone,)
+                    ).fetchone()
+                    if row and row[0]:
+                        language = row[0]
+                        script = row[1] or SUPPORTED_LANGUAGES.get(row[0], {}).get("default_script", "Latin")
+            except Exception:
+                pass
+
     conversation.update(detected_language=language, script_preference=script)
     merchant = AuthenticatedMerchant(
         message.tenant_id, actor_phone=message.sender_phone
@@ -88,10 +106,40 @@ def orchestrate_inbound_message(
             recipient_phone=message.sender_phone, text_content=str(exc)
         )
 
+    # Handle retry action on rejected transactions cleanly
+    if message.interactive_id and message.interactive_id.startswith("retry_"):
+        conversation.update(
+            active_candidate_id=None,
+            latest_question=None,
+            missing_fields=[],
+            candidate_revision=None,
+            expires_at=None,
+        )
+        retry_prompts = {
+            "te": "సరే, దయచేసి లావాదేవీ వివరాలను మళ్లీ వాయిస్ లేదా టెక్స్ట్ ద్వారా పంపండి.",
+            "hi": "ठीक है, कृपया लेन-देन का विवरण फिर से बोलकर या लिखकर भेजें।",
+            "ta": "சரி, உங்கள் பரிவர்த்தனை விவரங்களை மீண்டும் குரல் அல்லது செய்தியாக அனுப்பவும்.",
+            "en": "Sure, please resend your transaction details by voice note or text."
+        }
+        return None, OutboundMessage(
+            recipient_phone=message.sender_phone,
+            text_content=retry_prompts.get(language, retry_prompts["en"]),
+        )
+
     try:
         if message.message_type == MessageType.TEXT and (
             message.text_content or ""
-        ).strip().upper() in ("YES", "NO"):
+        ).strip().upper() in ("YES", "NO", "AVUNU", "HAAN", "AAMA"):
+            if conversation.get("active_candidate_id"):
+                row = service.ledger.get_candidate(
+                    merchant.merchant_id, conversation["active_candidate_id"]
+                )
+                if row.candidate.needs_clarification or row.candidate.requires_review:
+                    clarification = conversation.get("latest_question") or "Please provide the missing details first before confirming."
+                    return None, OutboundMessage(
+                        recipient_phone=message.sender_phone,
+                        text_content=f"{clarification}\n\n(Please provide the missing details first before confirming.)",
+                    )
             raise ConfirmationError(
                 "Use the Confirm or Cancel button for the specific candidate."
             )

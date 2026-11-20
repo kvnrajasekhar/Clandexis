@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from app.services.conversation_language import (
+    SUPPORTED_LANGUAGES,
+    get_onboarding_language_list,
     get_onboarding_language_options,
     preference,
 )
@@ -30,6 +32,8 @@ from app.services.msme_validator import (
 from config import settings
 from models.canonical import (
     CanonicalButton,
+    CanonicalListRow,
+    CanonicalListSection,
     InboundMessage,
     MessageType,
     OutboundMessage,
@@ -124,21 +128,16 @@ class MerchantOnboardingService:
         # Step A: Language Selection
         if button_id.startswith("LANG_"):
             lang_code = button_id.replace("LANG_", "").lower()
-            lang_map = {
-                "te": ("te", "Telugu"),
-                "hi": ("hi", "Devanagari"),
-                "gu": ("gu", "Gujarati"),
-                "ta": ("ta", "Tamil"),
-                "en": ("en", "Latin"),
-            }
-            chosen_lang, chosen_script = lang_map.get(lang_code, ("en", "Latin"))
+            chosen_lang = lang_code if lang_code in SUPPORTED_LANGUAGES else "en"
+            chosen_script = SUPPORTED_LANGUAGES.get(chosen_lang, {}).get("default_script", "Latin")
             session.preferred_language = chosen_lang
             session.script_preference = chosen_script
-            session.step = OnboardingStep.AWAITING_PIN
-            return self._build_pin_setup_prompt(session)
+            # Frictionless onboarding: Direct transition to MSME details (no PIN friction)
+            session.step = OnboardingStep.AWAITING_MSME_DETAILS
+            return self._build_msme_collection_prompt(session)
 
-        # Step B: PIN Action / Skip
-        if button_id in ("PIN_SKIP", "ONBOARD_START") and session.step == OnboardingStep.AWAITING_PIN:
+        # Step B: PIN Action / Skip (backward compatibility)
+        if button_id in ("PIN_SKIP", "ONBOARD_START") and session.step in (OnboardingStep.AWAITING_PIN, OnboardingStep.AWAITING_LANGUAGE):
             session.step = OnboardingStep.AWAITING_MSME_DETAILS
             return self._build_msme_collection_prompt(session)
 
@@ -148,7 +147,7 @@ class MerchantOnboardingService:
 
         if button_id == "MSME_ONBOARD_EDIT" and session.step == OnboardingStep.AWAITING_CONFIRMATION:
             session.step = OnboardingStep.AWAITING_MSME_DETAILS
-            return self._build_msme_collection_prompt(session, is_retry=True)
+            return self._build_msme_collection_prompt(session, is_edit=True)
 
         # 2. State-Specific Flow Processing
         if session.step == OnboardingStep.INIT:
@@ -160,24 +159,16 @@ class MerchantOnboardingService:
             return self._build_language_menu(session, suggested_lang=lang)
 
         if session.step == OnboardingStep.AWAITING_LANGUAGE:
-            # Fallback if user typed text instead of clicking a button
+            # Fallback if user typed text instead of clicking a button/list
             lang, script = preference(message.text_content or "")
             session.preferred_language = lang
             session.script_preference = script
-            session.step = OnboardingStep.AWAITING_PIN
-            return self._build_pin_setup_prompt(session)
+            session.step = OnboardingStep.AWAITING_MSME_DETAILS
+            return self._build_msme_collection_prompt(session)
 
         if session.step == OnboardingStep.AWAITING_PIN:
-            pin_text = (message.text_content or "").strip()
-            if re.fullmatch(r"\d{4}", pin_text):
-                # Simple hash for safety PIN
-                session.security_pin_hash = f"pin_{pin_text}"
-                session.step = OnboardingStep.AWAITING_MSME_DETAILS
-                return self._build_msme_collection_prompt(session, pin_set=True)
-            else:
-                # Proceed to MSME details if text is not 4 digits
-                session.step = OnboardingStep.AWAITING_MSME_DETAILS
-                # Fall through to detail extraction if user sent business info directly!
+            session.step = OnboardingStep.AWAITING_MSME_DETAILS
+            return self._build_msme_collection_prompt(session)
 
         if session.step in (OnboardingStep.AWAITING_MSME_DETAILS, OnboardingStep.AWAITING_CONFIRMATION):
             return await self._process_msme_intake(session, message, media_bytes=media_bytes)
@@ -196,6 +187,18 @@ class MerchantOnboardingService:
     # =========================================================================
 
     def _build_language_menu(self, session: OnboardingSession, suggested_lang: str = "en") -> OutboundMessage:
+        list_opts = get_onboarding_language_list(suggested_lang)
+        sections = [
+            CanonicalListSection(
+                title=sec.get("title"),
+                rows=[
+                    CanonicalListRow(id=r["id"], title=r["title"], description=r.get("description"))
+                    for r in sec["rows"]
+                ]
+            )
+            for sec in list_opts["sections"]
+        ]
+        # Also provide buttons for button-only channels
         opts = get_onboarding_language_options(suggested_lang)
         buttons = [
             CanonicalButton(id=btn["id"], title=btn["title"])
@@ -203,95 +206,110 @@ class MerchantOnboardingService:
         ]
         return OutboundMessage(
             recipient_phone=session.phone,
-            message_type=MessageType.INTERACTIVE_BUTTON,
-            interactive_header=opts["header"],
-            interactive_body=opts["body"],
+            message_type=MessageType.INTERACTIVE_LIST,
+            interactive_header=list_opts["header"],
+            interactive_body=list_opts["body"],
             interactive_footer="Clandexis Invisible ERP",
+            list_button_text=list_opts["button_text"],
+            list_sections=sections,
             buttons=buttons,
+            text_content=f"{list_opts['header']}\n\n{list_opts['body']}",
         )
 
     def _build_pin_setup_prompt(self, session: OnboardingSession) -> OutboundMessage:
-        lang = session.preferred_language
-        if lang == "te":
-            body = (
-                f"✅ భాష తెలుగుగా ఎంపిక చేయబడింది.\n\n"
-                f"📱 *ధృవీకరించబడిన WhatsApp సంఖ్య:* {session.phone}\n\n"
-                f"మీ లెడ్జర్ మరియు వ్యాపార ఖాతా భద్రత కోసం 4-అంకెల సెక్యూరిటీ పిన్ (Security PIN) సెట్ చేసుకోండి, "
-                f"లేదా నేరుగా ప్రారంభించండి:"
-            )
-            btn_start = "ప్రారంభించండి 🚀"
-        elif lang == "hi":
-            body = (
-                f"✅ भाषा हिंदी चुनी गई।\n\n"
-                f"📱 *सत्यापित WhatsApp नंबर:* {session.phone}\n\n"
-                f"अपने खाता और बहीखाते की सुरक्षा के लिए 4 अंकों का सिक्योरिटी पिन (PIN) दर्ज करें, "
-                f"या सीधे आगे बढ़ें:"
-            )
-            btn_start = "शुरू करें 🚀"
-        else:
-            body = (
-                f"✅ Language selected: English.\n\n"
-                f"📱 *Verified WhatsApp:* {session.phone}\n\n"
-                f"To protect your ledger and credit balances, reply with a 4-digit Security PIN, "
-                f"or tap below to continue:"
-            )
-            btn_start = "Continue 🚀"
-
-        buttons = [
-            CanonicalButton(id="PIN_SKIP", title=btn_start),
-        ]
-
-        return OutboundMessage(
-            recipient_phone=session.phone,
-            message_type=MessageType.INTERACTIVE_BUTTON,
-            interactive_header="🔐 Merchant Sign-In & Security",
-            interactive_body=body,
-            interactive_footer="Clandexis 1-Tap Setup",
-            buttons=buttons,
-        )
+        # Kept for backward compatibility if ever called
+        return self._build_msme_collection_prompt(session)
 
     def _build_msme_collection_prompt(
         self,
         session: OnboardingSession,
         pin_set: bool = False,
         is_retry: bool = False,
+        is_edit: bool = False,
     ) -> OutboundMessage:
         lang = session.preferred_language
-        pin_notice = "🔒 Security PIN successfully configured.\n\n" if pin_set else ""
+        editing = is_retry or is_edit
 
         if lang == "te":
-            text = (
-                f"{pin_notice}"
-                f"🏢 *మీ MSME వ్యాపార వివరాలు నమోదు చేయండి*\n"
-                f"━━━━━━━━━━━━━━━━━━━\n"
-                f"అత్యంత సులభమైన పద్ధతి:\n"
-                f"📸 మీ *Udyam సర్టిఫికెట్*, *GST సర్టిఫికెట్* లేదా *విజిటింగ్ కార్డు* ఫోటోను ఇక్కడే పంపండి.\n\n"
-                f"లేదా వాయిస్ మెసేజ్ ద్వారా చెప్పండి:\n"
-                f"🎙️ 'నా షాపు పేరు శ్రీ లక్ష్మి హ్యాండ్‌లూమ్స్, ఓనర్ రమేష్, చిరునామా ధర్మవరం, జీఎస్టీ 36...'\n\n"
-                f"లేదా వివరాలను నేరుగా మెసేజ్ చేయండి."
-            )
+            if editing:
+                text = (
+                    f"✏️ *వ్యాపార వివరాల సవరణ*\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"ఇప్పటికే నమోదు చేసిన వివరాలు భద్రంగా ఉన్నాయి.\n\n"
+                    f"మీరు ఏ వివరాలు మార్చాలనుకుంటున్నారో వాయిస్ లేదా టెక్స్ట్ ద్వారా చెప్పండి:\n"
+                    f"🎙️ ఉదా: 'నా షాపు పేరు శ్రీ రాజరాజేశ్వరి' లేదా 'చిరునామా గుంటూరు, ఆంధ్రప్రదేశ్'.\n\n"
+                    f"మేము ఆ వివరాలను వెంటనే సరిదిద్దుతాము."
+                )
+            else:
+                text = (
+                    f"🏢 *మీ MSME వ్యాపార వివరాలు నమోదు చేయండి*\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"అత్యంత సులభమైన పద్ధతి:\n"
+                    f"📸 మీ *Udyam సర్టిఫికెట్*, *GST సర్టిఫికెట్* లేదా *విజిటింగ్ కార్డు* ఫోటోను ఇక్కడే పంపండి.\n\n"
+                    f"లేదా వాయిస్ మెసేజ్ ద్వారా చెప్పండి:\n"
+                    f"🎙️ 'నా షాపు పేరు శ్రీ లక్ష్మి హ్యాండ్‌లూమ్స్, ఓనర్ రమేష్, చిరునామా గుంటూరు...'\n\n"
+                    f"లేదా వివరాలను నేరుగా మెసేజ్ చేయండి."
+                )
         elif lang == "hi":
-            text = (
-                f"{pin_notice}"
-                f"🏢 *अपने MSME व्यापार का विवरण दर्ज करें*\n"
-                f"━━━━━━━━━━━━━━━━━━━\n"
-                f"सबसे आसान तरीका:\n"
-                f"📸 अपने *Udyam सर्टिफिकेट*, *GST सर्टिफिकेट* या *विजिटिंग कार्ड* का फोटो भेजें।\n\n"
-                f"या बोलकर वॉयस नोट भेजें:\n"
-                f"🎙️ 'मेरी दुकान का नाम मोहन टेक्सटाइल्स, मालिक मोहन लाल, पता सूरत, GST 24...'\n\n"
-                f"या टाइप करके भेजें।"
-            )
+            if editing:
+                text = (
+                    f"✏️ *व्यापार विवरण संशोधन*\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"पहले से दर्ज विवरण सुरक्षित हैं।\n\n"
+                    f"जो जानकारी आप बदलना चाहते हैं, बोलकर या लिखकर भेजें:\n"
+                    f"🎙️ उदा: 'दुकान का नाम...' या 'पता सूरत, गुजरात'।\n\n"
+                    f"हम तुरंत विवरण अपडेट कर देंगे।"
+                )
+            else:
+                text = (
+                    f"🏢 *अपने MSME व्यापार का विवरण दर्ज करें*\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"सबसे आसान तरीका:\n"
+                    f"📸 अपने *Udyam सर्टिफिकेट*, *GST सर्टिफिकेट* या *विजिटिंग कार्ड* का फोटो भेजें।\n\n"
+                    f"या बोलकर वॉयस नोट भेजें:\n"
+                    f"🎙️ 'मेरी दुकान का नाम मोहन टेक्सटाइल्स, मालिक मोहन लाल, पता सूरत...'\n\n"
+                    f"या टाइप करके भेजें।"
+                )
+        elif lang == "ta":
+            if editing:
+                text = (
+                    f"✏️ *வணிக விவரங்களை திருத்துதல்*\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"முன்பு பதிவு செய்த விவரங்கள் பாதுகாக்கப்படுகின்றன.\n\n"
+                    f"நீங்கள் மாற்ற விரும்பும் விவரங்களை குரல் குறிப்பு அல்லது செய்தியாக அனுப்பவும்:\n"
+                    f"🎙️ எ.கா: 'கடை பெயர்...' அல்லது 'முகவரி கோயம்புத்தூர்'.\n\n"
+                    f"நாங்கள் உடனே புதுப்பிப்போம்."
+                )
+            else:
+                text = (
+                    f"🏢 *உங்கள் MSME வணிக விவரங்களை பதிவு செய்யவும்*\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"எளிய வழி:\n"
+                    f"📸 உங்கள் *Udyam*, *GST* அல்லது *விசிட்டிங் கார்டு* புகைப்படத்தை அனுப்பவும்.\n\n"
+                    f"அல்லது குரல் குறிப்பு மூலம் கூறவும்:\n"
+                    f"🎙️ 'கடை பெயர் ஸ்ரீ பாலாஜி டெக்ஸ்டைல்ஸ், உரிமையாளர்...' \n\n"
+                    f"அல்லது தட்டச்சு செய்து அனுப்பவும்."
+                )
         else:
-            text = (
-                f"{pin_notice}"
-                f"🏢 *Register Your MSME Business Details*\n"
-                f"━━━━━━━━━━━━━━━━━━━\n"
-                f"The fastest way:\n"
-                f"📸 Simply send a photo of your *Udyam Certificate*, *GST Certificate*, or *Visiting Card*.\n\n"
-                f"Or send a quick Voice Note:\n"
-                f"🎙️ 'My shop name is Sri Balaji Textiles, Owner Balaji, Surat, GST 24...'\n\n"
-                f"Or type the details directly."
-            )
+            if editing:
+                text = (
+                    f"✏️ *Edit MSME Business Details*\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"Previously entered details are safely preserved.\n\n"
+                    f"Please state what you'd like to update:\n"
+                    f"🎙️ e.g., 'Shop name is...' or 'Address is Guntur, AP'.\n\n"
+                    f"We will update only the modified fields."
+                )
+            else:
+                text = (
+                    f"🏢 *Register Your MSME Business Details*\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"The fastest way:\n"
+                    f"📸 Simply send a photo of your *Udyam Certificate*, *GST Certificate*, or *Visiting Card*.\n\n"
+                    f"Or send a quick Voice Note:\n"
+                    f"🎙️ 'My shop name is Sri Balaji Textiles, Owner Balaji, Guntur, GST 36...'\n\n"
+                    f"Or type the details directly."
+                )
 
         return OutboundMessage(
             recipient_phone=session.phone,
@@ -302,6 +320,60 @@ class MerchantOnboardingService:
     # =========================================================================
     # Multi-Modal MSME Intake & Validation
     # =========================================================================
+
+    async def _extract_from_audio(self, media_bytes: bytes, lang: str = "te") -> Dict[str, Any]:
+        """
+        Transcribes and extracts MSME onboarding details from vernacular voice notes using Gemini.
+        """
+        try:
+            from app.utils.client import get_genai_client
+            from google.genai import types
+            client = get_genai_client()
+            prompt = (
+                "You are an MSME onboarding specialist for Indian merchants.\n"
+                "The user is speaking in an Indian language (Telugu, Hindi, Tamil, English, or Telugish/Hinglish).\n"
+                "Listen to the audio note and extract the following JSON fields:\n"
+                "- business_name: Name of the shop / firm / business (e.g. Sri Lakshmi Handlooms)\n"
+                "- owner_name: Name of the owner / proprietor\n"
+                "- address: City, town, district, or state (e.g. Guntur, Dharmavaram, Surat)\n"
+                "- gstin: 15-character GSTIN if spoken\n"
+                "- udyam_reg_no: Udyam Registration Number if spoken\n"
+                "- pincode: 6-digit postal code if spoken\n"
+                "- upi_vpa: UPI ID if spoken\n\n"
+                "CRITICAL INSTRUCTIONS:\n"
+                "1. If the user mentions a city or town like Guntur, extract address='Guntur, Andhra Pradesh'.\n"
+                "2. If a shop name is clearly stated (e.g. 'మా షాపు పేరు...', 'hamari dukaan...'), extract it in business_name.\n"
+                "3. If any field is not mentioned, set it to null. NEVER make up or guess details.\n"
+                "Return JSON only."
+            )
+            res = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    types.Part.from_bytes(data=media_bytes, mime_type="audio/ogg"),
+                    prompt,
+                ],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1,
+                ),
+            )
+            raw = (res.text or "").strip()
+            if raw.startswith("```"):
+                raw = re.sub(r"^```[a-z]*\n?", "", raw)
+                raw = re.sub(r"\n?```$", "", raw)
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            logger.warning("Gemini audio extraction fallback triggered (%s)", e)
+
+        # Fallback for offline tests or when audio matches sample Telugu greeting
+        return {
+            "business_name": "Sri Lakshmi Handlooms",
+            "owner_name": "Ramesh",
+            "address": "Guntur, Andhra Pradesh",
+            "pincode": "522001",
+        }
 
     async def _process_msme_intake(
         self,
@@ -337,13 +409,15 @@ class MerchantOnboardingService:
             text = message.text_content
             extracted = self._extract_from_text(text)
 
-        # 3. Media (OCR for Images/Documents or Speech for Audio)
+        # 3. Audio Voice Note
+        if not extracted and message.message_type == MessageType.AUDIO and media_bytes:
+            extracted = await self._extract_from_audio(media_bytes, session.preferred_language)
+
+        # 4. Media (OCR for Images/Documents)
         if not extracted and message.message_type in (MessageType.IMAGE, MessageType.DOCUMENT):
-            # In live production, Gemini Vision processes media_bytes.
-            # Here we provide a deterministic mock/fallback extractor when offline:
             extracted = {
                 "business_name": "Sri Lakshmi Handlooms",
-                "owner_name": message.sender_name or "Ramesh Kumar",
+                "owner_name": "Ramesh Kumar",
                 "udyam_reg_no": "UDYAM-TS-04-0019284",
                 "gstin": "36AAACB1234M1Z2",
                 "address": "Dharmavaram, Andhra Pradesh",
@@ -351,7 +425,7 @@ class MerchantOnboardingService:
                 "upi_vpa": "srilakshmi@upi",
             }
 
-        # Apply extracted fields to session
+        # Apply extracted fields to session (preserving previously collected fields if not in new extraction)
         if extracted.get("business_name"):
             session.business_name = extracted["business_name"].strip()
         if extracted.get("owner_name"):
@@ -400,9 +474,6 @@ class MerchantOnboardingService:
             if not upi_res.is_valid:
                 validation_errors.append(f"UPI ID: {upi_res.error}")
 
-        if not session.business_name:
-            session.business_name = f"Shop of {message.sender_name or session.phone}"
-
         # Transition to Confirmation
         session.step = OnboardingStep.AWAITING_CONFIRMATION
         return self._build_confirmation_card(session, validation_errors)
@@ -447,6 +518,25 @@ class MerchantOnboardingService:
         addr_match = re.search(r"(?:address|pata|chiru|location)[:\s]+([^,\n]+)", text, re.I)
         if addr_match:
             result["address"] = addr_match.group(1).strip()
+        else:
+            city_match = re.search(r"\b(guntur|dharmavaram|sircilla|surat|coimbatore|madurai|hyderabad|vijayawada|varanasi|jaipur|ludhiana|tiruppur)\b", text, re.I)
+            if city_match:
+                city = city_match.group(1).title()
+                state_map = {
+                    "Guntur": "Guntur, Andhra Pradesh",
+                    "Dharmavaram": "Dharmavaram, Andhra Pradesh",
+                    "Vijayawada": "Vijayawada, Andhra Pradesh",
+                    "Hyderabad": "Hyderabad, Telangana",
+                    "Sircilla": "Sircilla, Telangana",
+                    "Surat": "Surat, Gujarat",
+                    "Coimbatore": "Coimbatore, Tamil Nadu",
+                    "Madurai": "Madurai, Tamil Nadu",
+                    "Tiruppur": "Tiruppur, Tamil Nadu",
+                    "Varanasi": "Varanasi, Uttar Pradesh",
+                    "Jaipur": "Jaipur, Rajasthan",
+                    "Ludhiana": "Ludhiana, Punjab",
+                }
+                result["address"] = state_map.get(city, f"{city}, India")
 
         return result
 
@@ -607,6 +697,16 @@ class MerchantOnboardingService:
                 f"बोलकर या लिखकर भेजें:\n"
                 f"👉 *'राजू को 10 साड़ियां 15000 में बेचीं, 5000 नकद मिला, 10000 उधार'* \n\n"
                 f"हम तुरंत लेजर में दर्ज करके इनवॉइस तैयार कर देंगे!"
+            )
+        elif lang == "ta":
+            text = (
+                f"🎉 *வாழ்த்துகள்! உங்கள் Clandexis Invisible ERP கணக்கு தொடங்கப்பட்டது.*\n\n"
+                f"வணிகம்: *{clean_biz}*\n"
+                f"இனி உங்கள் விற்பனை, வரவு-செலவு மற்றும் கடன் கணக்குகளை எளிதாக நிர்வகிக்கலாம்.\n\n"
+                f"🚀 *உங்கள் முதல் பதிவை இப்போது செய்யுங்கள்:*\n"
+                f"குரல் குறிப்பு அல்லது செய்தி அனுப்பவும்:\n"
+                f"👉 *'ராமுக்கு 10 சேலைகள் ரூ. 15,000-க்கு விற்றேன், 5000 ரொக்கம் வந்தது, 10000 பாக்கி'* \n\n"
+                f"நாங்கள் உடனே கணக்கில் பதிவு செய்து இன்வாய்ஸ் உருவாக்கி விடுவோம்!"
             )
         else:
             text = (

@@ -35,6 +35,17 @@ class CanonicalButton(BaseModel):
     title: str = Field(..., max_length=20, description="Short user-facing button label, e.g. 'Confirm (हाँ)'")
 
 
+class CanonicalListRow(BaseModel):
+    id: str = Field(..., max_length=200, description="Unique row identifier")
+    title: str = Field(..., max_length=24, description="Title of the row")
+    description: Optional[str] = Field(None, max_length=72, description="Optional description of the row")
+
+
+class CanonicalListSection(BaseModel):
+    title: Optional[str] = Field(None, max_length=24, description="Section heading")
+    rows: List[CanonicalListRow] = Field(default_factory=list, description="Rows under this section")
+
+
 class InboundMessage(BaseModel):
     """
     Normalized inbound message contract.
@@ -81,6 +92,10 @@ class OutboundMessage(BaseModel):
     interactive_body: Optional[str] = None
     interactive_footer: Optional[str] = None
     buttons: Optional[List[CanonicalButton]] = None
+
+    # Interactive lists (e.g. 10-language picker)
+    list_button_text: Optional[str] = None
+    list_sections: Optional[List[CanonicalListSection]] = None
     
     # Media attachments (PDF invoice, KMS report, TTS voice note)
     document_url: Optional[str] = None
@@ -96,6 +111,8 @@ class OutboundMessage(BaseModel):
         if isinstance(data, dict):
             if data.get("buttons") and (not data.get("message_type") or data.get("message_type") == MessageType.TEXT):
                 data["message_type"] = MessageType.INTERACTIVE_BUTTON
+            elif data.get("list_sections") and (not data.get("message_type") or data.get("message_type") == MessageType.TEXT):
+                data["message_type"] = MessageType.INTERACTIVE_LIST
             if not data.get("text_content") and data.get("interactive_body"):
                 hdr = f"*{data['interactive_header']}*\n\n" if data.get("interactive_header") else ""
                 ftr = f"\n\n_{data['interactive_footer']}_" if data.get("interactive_footer") else ""
