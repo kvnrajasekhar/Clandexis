@@ -31,7 +31,7 @@ class MessageType(str, Enum):
 
 
 class CanonicalButton(BaseModel):
-    id: str = Field(..., description="Developer defined action identifier, e.g. 'CONFIRM_TXN_123'")
+    id: str = Field(..., description="Candidate-specific canonical action identifier")
     title: str = Field(..., max_length=20, description="Short user-facing button label, e.g. 'Confirm (हाँ)'")
 
 

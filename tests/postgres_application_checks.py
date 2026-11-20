@@ -528,6 +528,147 @@ def test_provider_failure_can_retry_same_persisted_event(app_client, monkeypatch
     assert ledger.get_daily_summary(merchant).sales_total == 0
 
 
+def test_signed_webhook_queries_use_postgres_and_never_mutate_ledger(
+    app_client, monkeypatch
+):
+    """Production webhook queries are tenant-scoped SQL reads, never legacy state."""
+    client, db, merchant, other, phone, second, sent, root = app_client
+
+    # Create different durable stock for merchant A through the canonical flow.
+    production = TransactionCandidate(
+        transaction_type="stock_added",
+        items=[dict(item_name="Cotton Shirt", quantity=10, unit="pieces")],
+        validation_status="ACCEPTED",
+    )
+    mock_pipeline(monkeypatch, production)
+    text(client, phone, "Produced 10 cotton shirts", "query-seed-stock")
+    cid = sent[-1].buttons[0].id.split(":")[-1]
+    confirm(client, phone, cid, "query-seed-stock-confirm")
+
+    # Create an A-only customer balance through candidate-specific confirmation.
+    mock_pipeline(monkeypatch, sale())
+    text(client, phone, "Suresh sale with UPI and credit", "query-seed-sale")
+    sale_cid = sent[-1].buttons[0].id.split(":")[-1]
+    before_confirm = ledger.get_daily_summary(merchant)
+    assert before_confirm.sales_total == 0  # model confidence never auto-commits
+    confirm(client, phone, sale_cid, "query-seed-sale-confirm")
+
+    def financial_counts(mid):
+        with db.transaction(mid) as conn:
+            return tuple(
+                conn.execute(
+                    f"SELECT count(*) AS n FROM {table} WHERE merchant_id=%s",
+                    (mid,),
+                ).fetchone()["n"]
+                for table in (
+                    "transaction_candidates",
+                    "transactions",
+                    "inventory_movements",
+                    "party_balance_movements",
+                    "payments",
+                )
+            )
+
+    baseline_a = financial_counts(merchant)
+    baseline_b = financial_counts(other)
+
+    text(client, phone, "Stock kitna hai?", "query-stock-a")
+    assert "160" in sent[-1].text_content
+    text(client, second, "Stock kitna hai?", "query-stock-b")
+    assert "200" in sent[-1].text_content and "160" not in sent[-1].text_content
+
+    text(client, phone, "Suresh Traders ka udhaar kitna hai?", "query-balance-a")
+    assert "8,000" in sent[-1].text_content
+    sign_in(client)
+    dashboard_party = next(
+        p
+        for p in client.get("/api/v1/dashboard/parties").json()
+        if p["display_name"] == "Suresh Traders"
+    )
+    assert dashboard_party["current_udhaar_balance"] == 8000
+
+    # Duplicate delivery is cached; only workflow metadata may change, never ledger state.
+    text(client, phone, "Stock kitna hai?", "query-duplicate")
+    text(client, phone, "Stock kitna hai?", "query-duplicate")
+
+    # Legacy transaction IDs are invalid and cannot reach canonical confirmation.
+    callback(
+        client,
+        phone,
+        "legacy-confirm",
+        "interactive",
+        {
+            "interactive": {
+                "type": "button_reply",
+                "button_reply": {
+                    "id": f"CONFIRM_TXN_{sale_cid}",
+                    "title": "Confirm",
+                },
+            }
+        },
+    )
+    assert "Invalid confirmation button" in sent[-1].text_content
+
+    text(client, phone, "PDF ledgers kavali", "query-pdf")
+    assert "post avvaledu" in sent[-1].text_content
+    assert financial_counts(merchant) == baseline_a
+    assert financial_counts(other) == baseline_b
+
+    # A fresh interpreter process reads the same SQL stock without process memory.
+    import subprocess
+    import sys
+
+    code = """
+import sys
+from app.services.confirmation import AuthenticatedMerchant
+from app.services.query_service import QueryService
+r=QueryService().handle(AuthenticatedMerchant(sys.argv[1]),'Stock kitna hai?',sys.argv[2],language='hi',script='Latin')
+print(r.text_content)
+"""
+    output = subprocess.check_output(
+        [sys.executable, "-c", code, merchant, phone],
+        env=dict(os.environ),
+        text=True,
+        cwd=str(Path(__file__).resolve().parents[1]),
+    )
+    assert "160" in output
+
+
+def test_report_query_preserves_telugu_pending_candidate(app_client, monkeypatch):
+    client, db, merchant, other, phone, second, sent, root = app_client
+    partial = TransactionCandidate(
+        transaction_type="sale",
+        buyer_name="Raju",
+        items=[dict(item_name="Cotton Shirt", quantity=10)],
+        needs_clarification=True,
+        missing_fields=["unit_price", "payment_details"],
+    )
+    mock_pipeline(monkeypatch, partial)
+    text(client, phone, "Nenu Raju ki 10 shirts ammnu", "pending-telugu")
+    with db.transaction(merchant) as conn:
+        before = conn.execute(
+            "SELECT active_candidate_id,candidate_revision FROM conversations WHERE merchant_id=%s",
+            (merchant,),
+        ).fetchone()
+    assert "price entha" in sent[-1].text_content and not sent[-1].buttons
+
+    text(client, phone, "PDF ledgers kavali", "pending-report")
+    with db.transaction(merchant) as conn:
+        after = conn.execute(
+            "SELECT active_candidate_id,candidate_revision FROM conversations WHERE merchant_id=%s",
+            (merchant,),
+        ).fetchone()
+        assert (
+            conn.execute(
+                "SELECT count(*) AS n FROM transactions WHERE merchant_id=%s AND intent<>'OPENING_BALANCE'",
+                (merchant,),
+            ).fetchone()["n"]
+            == 0
+        )
+    assert before == after
+    assert "post avvaledu" in sent[-1].text_content
+
+
 def test_demo_launcher_initializes_environment_before_imports(app_client, tmp_path):
     import subprocess
     import sys

@@ -15,7 +15,7 @@ import asyncio
 from datetime import datetime, timezone
 import pytest
 
-from agent_orchestrator.orchestrator import AgentOrchestrator
+from tests.legacy_in_memory_orchestrator import AgentOrchestrator
 from models.canonical import CanonicalButton, ChannelType, InboundMessage, MessageType, OutboundMessage
 from models.firestore_schema import PaymentMethod, TransactionStatus
 

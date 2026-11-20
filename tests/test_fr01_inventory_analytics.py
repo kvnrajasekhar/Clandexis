@@ -9,7 +9,7 @@ import copy
 import pytest
 from datetime import datetime, timezone
 
-from agent_orchestrator import AgentOrchestrator
+from tests.legacy_in_memory_orchestrator import AgentOrchestrator
 from models.canonical import ChannelType, InboundMessage, MessageType, OutboundMessage
 from models.firestore_schema import MovementType, TransactionIntent, TransactionStatus
 

@@ -9,7 +9,7 @@ Ensures that arbitrary items (e.g. "Sold 3 cycles for 25000"):
 import asyncio
 import pytest
 
-from agent_orchestrator.orchestrator import AgentOrchestrator
+from tests.legacy_in_memory_orchestrator import AgentOrchestrator
 from models.canonical import ChannelType, InboundMessage, MessageType
 from models.firestore_schema import TransactionStatus
 
