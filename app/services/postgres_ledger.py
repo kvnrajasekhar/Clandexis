@@ -32,6 +32,10 @@ def _merchant(conn, merchant_id, actor=None, lock=False):
     if not row:
         raise MerchantNotFoundError("Approved merchant unavailable")
     if actor is not None and actor not in (str(row["id"]), row["phone_e164"]):
+        from app.services.whatsapp_identity import resolve_phone
+        resolved = resolve_phone(actor)
+        if resolved and str(resolved) == str(row["id"]):
+            return row
         raise rules.NotAuthorizedError("Actor is not authorized for this merchant")
     return row
 

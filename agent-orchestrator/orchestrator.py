@@ -123,6 +123,19 @@ def orchestrate_inbound_message(
 
     # Queries are read-only and intentionally do not alter pending candidate state.
     if message.message_type == MessageType.TEXT:
+        clean_text = (message.text_content or "").strip().lower()
+        if clean_text in ("hi", "hello", "hey", "namaste", "namaskaram", "start", "help"):
+            return None, OutboundMessage(
+                recipient_phone=message.sender_phone,
+                text_content=(
+                    "👋 *Hello! Welcome to Clandexis Invisible ERP.*\n\n"
+                    "You can record transactions using Voice Notes, Bill Photos, or Text:\n"
+                    "• *Sale*: 'Sold 20 Cotton Shirt to Ramesh for 4000 cash, 2000 credit'\n"
+                    "• *Stock*: 'stock status' or 'maal kitna hai'\n"
+                    "• *Khata/Balance*: 'Ramesh balance' or 'udhaar dikhao'\n\n"
+                    "Try sending an audio note or typing a transaction!"
+                ),
+            )
         query = query_service.handle(
             merchant,
             message.text_content or "",
