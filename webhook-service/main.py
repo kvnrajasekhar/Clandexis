@@ -132,8 +132,16 @@ async def process_inbound_message(message: InboundMessage):
     Background worker passing normalized message to Agent Orchestrator.
     """
     logger.info(f"Processing inbound message {message.message_id} in background pipeline...")
-    # This invokes the agent-orchestrator router / extractor
-    # (Dev 2 / Agent Orchestrator pipeline)
+    try:
+        from agent_orchestrator import orchestrate_inbound_message
+        result, outbound = orchestrate_inbound_message(message)
+        logger.info(f"Orchestration completed for {message.message_id}. Status: {result.extraction.transactions[0].validation_status if result.extraction.transactions else 'N/A'}")
+        
+        # Dispatch WhatsApp reply back to user
+        if meta_service:
+            await meta_service.dispatch_outbound(outbound)
+    except Exception as e:
+        logger.error(f"Error in process_inbound_message: {e}", exc_info=True)
 
 
 # ==============================================================================
