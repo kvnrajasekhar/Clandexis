@@ -321,10 +321,8 @@ class MetaWhatsAppService:
         """
         to_phone = message.recipient_phone.replace("+", "")
         
-        if message.message_type == MessageType.TEXT and message.text_content:
-            return await self.send_text_message(to_phone, message.text_content)
-        
-        elif message.message_type == MessageType.INTERACTIVE_BUTTON and message.buttons:
+        # 1. Interactive Button Card (routes if buttons are present or type is INTERACTIVE_BUTTON)
+        if (message.message_type == MessageType.INTERACTIVE_BUTTON or message.buttons) and message.buttons:
             return await self.send_interactive_buttons(
                 to=to_phone,
                 body_text=message.interactive_body or message.text_content or "Please confirm:",
@@ -346,6 +344,9 @@ class MetaWhatsAppService:
                 to=to_phone,
                 audio_url=message.audio_url,
             )
+
+        elif message.text_content or message.interactive_body:
+            return await self.send_text_message(to_phone, message.text_content or message.interactive_body or "")
 
         logger.warning(f"Unsupported outbound message format: {message.message_type}")
         return None
@@ -390,9 +391,9 @@ class MetaWhatsAppService:
             type=MetaMessageType.INTERACTIVE,
             interactive=MetaInteractivePayload(
                 type="button",
-                header=MetaInteractiveHeader(type="text", text=header_text) if header_text else None,
-                body=MetaInteractiveBody(text=body_text),
-                footer=MetaInteractiveFooter(text=footer_text) if footer_text else None,
+                header=MetaInteractiveHeader(type="text", text=header_text[:60]) if header_text else None,
+                body=MetaInteractiveBody(text=body_text[:1024]),
+                footer=MetaInteractiveFooter(text=footer_text[:60]) if footer_text else None,
                 action=MetaInteractiveAction(buttons=meta_buttons),
             ),
         )

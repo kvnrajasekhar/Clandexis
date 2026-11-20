@@ -8,7 +8,7 @@ from core AI reasoning, human-in-the-loop safety gates, and atomic ledger mutati
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 
 class ChannelType(str, Enum):
@@ -89,3 +89,15 @@ class OutboundMessage(BaseModel):
     image_url: Optional[str] = None
 
     model_config = ConfigDict(extra="ignore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def set_interactive_defaults(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if data.get("buttons") and (not data.get("message_type") or data.get("message_type") == MessageType.TEXT):
+                data["message_type"] = MessageType.INTERACTIVE_BUTTON
+            if not data.get("text_content") and data.get("interactive_body"):
+                hdr = f"*{data['interactive_header']}*\n\n" if data.get("interactive_header") else ""
+                ftr = f"\n\n_{data['interactive_footer']}_" if data.get("interactive_footer") else ""
+                data["text_content"] = f"{hdr}{data['interactive_body']}{ftr}".strip()
+        return data
