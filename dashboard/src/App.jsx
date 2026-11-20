@@ -122,7 +122,7 @@ export default function App() {
   const [actionMessage, setActionMessage] = useState(null);
 
   // Demo Extractor Form state
-  const [demoText, setDemoText] = useState("Sold 50 Cotton Shirt (L) to Suresh Traders at INR 200 each, total INR 10000. Received INR 2000 by UPI. Remaining INR 8000 on credit.");
+  const [demoText, setDemoText] = useState("");
   const [audioFile, setAudioFile] = useState(null);
   const [demoLoading, setDemoLoading] = useState(false);
   const [demoResult, setDemoResult] = useState(null);
@@ -208,7 +208,7 @@ export default function App() {
     setDemoResult(null);
     try {
       const fields = { merchant_id: MERCHANT_ID, message_id: crypto.randomUUID(),
-        merchant_business_name: "Sri Balaji Textiles", stage: true };
+        merchant_business_name: session?.business_name || "My Business", stage: true };
       let response;
       if (audioFile) {
         const form = new FormData();
@@ -625,24 +625,30 @@ export default function App() {
                   Live Inventory Levels
                 </h2>
                 <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2">
-                  {inventory.map((item) => (
-                    <div key={item.sku_id} className="p-2 rounded-lg bg-slate-950/60 border border-slate-800 flex justify-between items-center text-xs">
-                      <div>
-                        <div className="font-medium text-white">{item.item_name}</div>
-                        <div className="text-[10px] text-slate-400">Default: ₹{item.default_unit_price} / {item.unit}</div>
-                      </div>
-                      <div className="text-right">
-                        <div className={`font-bold text-sm ${item.below_reorder_level ? 'text-rose-400' : 'text-emerald-400'}`}>
-                          {item.current_stock} <span className="text-[10px] font-normal text-slate-400">{item.unit}</span>
-                        </div>
-                        {item.below_reorder_level && (
-                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20">
-                            Low Stock (Reorder: {item.reorder_level})
-                          </span>
-                        )}
-                      </div>
+                  {inventory.length === 0 ? (
+                    <div className="p-4 text-center text-xs text-slate-500">
+                      No inventory items registered yet.
                     </div>
-                  ))}
+                  ) : (
+                    inventory.map((item) => (
+                      <div key={item.sku_id} className="p-2 rounded-lg bg-slate-950/60 border border-slate-800 flex justify-between items-center text-xs">
+                        <div>
+                          <div className="font-medium text-white">{item.item_name}</div>
+                          <div className="text-[10px] text-slate-400">Default: ₹{item.default_unit_price} / {item.unit}</div>
+                        </div>
+                        <div className="text-right">
+                          <div className={`font-bold text-sm ${item.below_reorder_level ? 'text-rose-400' : 'text-emerald-400'}`}>
+                            {item.current_stock} <span className="text-[10px] font-normal text-slate-400">{item.unit}</span>
+                          </div>
+                          {item.below_reorder_level && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20">
+                              Low Stock (Reorder: {item.reorder_level})
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
             </div>
@@ -749,33 +755,41 @@ export default function App() {
         {activeTab === 'inventory' && (
           <div className="space-y-4">
             <h2 className="text-base font-bold text-white">Master Inventory Catalog & Stock Movements</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {inventory.map((it) => (
-                <div key={it.sku_id} className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-2">
-                  <div className="flex justify-between items-start">
-                    <div>
-                      <h3 className="font-bold text-white text-sm">{it.item_name}</h3>
-                      <p className="text-xs text-slate-400">SKU: {it.sku_id}</p>
+            {inventory.length === 0 ? (
+              <div className="bg-slate-900 border border-slate-800 rounded-xl p-8 text-center text-slate-400">
+                <Package className="w-10 h-10 mx-auto mb-2 text-slate-600" />
+                <p className="font-semibold text-slate-200">No inventory items registered yet</p>
+                <p className="text-xs text-slate-500 mt-1">Your inventory catalog will automatically populate as products and stock entries are recorded via WhatsApp or voice transactions.</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {inventory.map((it) => (
+                  <div key={it.sku_id} className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-2">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <h3 className="font-bold text-white text-sm">{it.item_name}</h3>
+                        <p className="text-xs text-slate-400">SKU: {it.sku_id}</p>
+                      </div>
+                      <span className={`px-2 py-0.5 text-[10px] font-bold rounded ${it.below_reorder_level ? 'bg-rose-500/10 text-rose-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
+                        {it.below_reorder_level ? 'Low Stock' : 'In Stock'}
+                      </span>
                     </div>
-                    <span className={`px-2 py-0.5 text-[10px] font-bold rounded ${it.below_reorder_level ? 'bg-rose-500/10 text-rose-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
-                      {it.below_reorder_level ? 'Low Stock' : 'In Stock'}
-                    </span>
+                    <div className="pt-2 border-t border-slate-800 flex justify-between items-baseline">
+                      <span className="text-xs text-slate-400">Available:</span>
+                      <span className="text-xl font-bold text-white">{it.current_stock} {it.unit}</span>
+                    </div>
+                    <div className="flex justify-between text-xs text-slate-400">
+                      <span>Default Price:</span>
+                      <span>₹{it.default_unit_price}</span>
+                    </div>
+                    <div className="flex justify-between text-xs text-slate-400">
+                      <span>Reorder Level:</span>
+                      <span>{it.reorder_level} {it.unit}</span>
+                    </div>
                   </div>
-                  <div className="pt-2 border-t border-slate-800 flex justify-between items-baseline">
-                    <span className="text-xs text-slate-400">Available:</span>
-                    <span className="text-xl font-bold text-white">{it.current_stock} {it.unit}</span>
-                  </div>
-                  <div className="flex justify-between text-xs text-slate-400">
-                    <span>Default Price:</span>
-                    <span>₹{it.default_unit_price}</span>
-                  </div>
-                  <div className="flex justify-between text-xs text-slate-400">
-                    <span>Reorder Level:</span>
-                    <span>{it.reorder_level} {it.unit}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 

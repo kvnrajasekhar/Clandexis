@@ -109,17 +109,27 @@ def google_login(payload: GoogleLoginRequest, request: Request):
     business_name = None
     phone_number = None
 
+    DEMO_MERCHANT_ID = "00000000-0000-0000-0000-000000000001"
     if settings.DATABASE_BACKEND == "postgres" and settings.DATABASE_URL:
         from app.services.postgres_db import PostgresDatabase
         db = PostgresDatabase()
         try:
-            target_merchant = settings.DASHBOARD_DEMO_MERCHANT_ID or "00000000-0000-0000-0000-000000000001"
             with psycopg.connect(db.dsn, connect_timeout=5) as conn:
-                conn.execute("SELECT set_config('app.merchant_id', %s, false)", (target_merchant,))
+                # 1. Query for an existing merchant owned by this Google email
                 row = conn.execute(
-                    "SELECT id, business_name, phone_e164, tax_address FROM merchants WHERE id = %s LIMIT 1",
-                    (target_merchant,)
+                    "SELECT id, business_name, phone_e164, tax_address FROM merchants WHERE owner_email = %s LIMIT 1",
+                    (email,)
                 ).fetchone()
+
+                # If the demo merchant was previously mistakenly linked to this email, unlink it
+                if row and str(row[0]) == DEMO_MERCHANT_ID:
+                    conn.execute(
+                        "UPDATE merchants SET owner_email = NULL, owner_name = 'Demo Merchant' WHERE id = %s",
+                        (DEMO_MERCHANT_ID,)
+                    )
+                    conn.commit()
+                    row = None
+
                 tax_data = row[3] if row and isinstance(row[3], dict) else {}
                 if not picture and tax_data.get("picture"):
                     picture = tax_data["picture"]
@@ -131,12 +141,12 @@ def google_login(payload: GoogleLoginRequest, request: Request):
                     business_name = row[1]
                     phone_number = str(row[2]) if row[2] else None
                     conn.execute(
-                        "UPDATE merchants SET owner_email = %s, owner_name = %s, tax_address = %s WHERE id = %s",
-                        (email, name, tax_json, merchant_id)
+                        "UPDATE merchants SET owner_name = %s, tax_address = %s WHERE id = %s",
+                        (name, tax_json, merchant_id)
                     )
                 else:
-                    new_id = target_merchant
-                    business_name = f"{name}'s Enterprise"
+                    new_id = str(uuid4())
+                    business_name = f"{name}'s Business"
                     phone_number = f"+91{abs(hash(email)) % 9000000000 + 1000000000}"
                     conn.execute(
                         """INSERT INTO merchants (id, phone_e164, is_approved, business_name, owner_name, owner_email, tax_address)
@@ -147,13 +157,13 @@ def google_login(payload: GoogleLoginRequest, request: Request):
                 conn.commit()
         except Exception as e:
             logging.warning("Database lookup during auth for %s: %s (using graceful fallback)", email, e)
-            merchant_id = settings.DASHBOARD_DEMO_MERCHANT_ID or str(uuid4())
-            business_name = f"{name}'s Enterprise"
+            merchant_id = str(uuid4())
+            business_name = f"{name}'s Business"
             phone_number = f"+91{abs(hash(email)) % 9000000000 + 1000000000}"
 
     if not merchant_id:
-        merchant_id = settings.DASHBOARD_DEMO_MERCHANT_ID or str(uuid4())
-        business_name = f"{name}'s Enterprise"
+        merchant_id = str(uuid4())
+        business_name = f"{name}'s Business"
         phone_number = f"+91{abs(hash(email)) % 9000000000 + 1000000000}"
 
     request.session.clear()
