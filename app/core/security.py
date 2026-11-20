@@ -16,8 +16,10 @@ import json
 import re
 import psycopg
 from config import settings
+from app.core.observability import unavailable
 
 router = APIRouter(prefix="/auth", tags=["Session"])
+logger = logging.getLogger(__name__)
 
 
 def normalize_phone(phone: str) -> str:
@@ -114,9 +116,11 @@ def google_login(payload: GoogleLoginRequest, request: Request):
                 google_requests.Request(),
                 settings.GOOGLE_CLIENT_ID or None
             )
-        except Exception as e:
-            logging.warning("Google ID token verification failed: %s", e)
-            raise HTTPException(401, f"Google authentication failed: {str(e)}")
+        except Exception as exc:
+            error = unavailable(logger, "auth.google_token_verification", exc,
+                                "Google authentication failed")
+            error.status_code = 401
+            raise error from None
 
     email = id_info.get("email")
     name = id_info.get("name") or (email.split("@")[0] if email else "Merchant")
@@ -131,6 +135,15 @@ def google_login(payload: GoogleLoginRequest, request: Request):
     needs_onboarding = True
 
     DEMO_MERCHANT_ID = "00000000-0000-0000-0000-000000000001"
+    if settings.is_production and (
+        settings.DATABASE_BACKEND != "postgres" or not settings.DATABASE_URL
+    ):
+        raise unavailable(
+            logger,
+            "auth.database_configuration",
+            RuntimeError("database configuration unavailable"),
+            "Merchant account service unavailable",
+        ) from None
     if settings.DATABASE_BACKEND == "postgres" and settings.DATABASE_URL:
         from app.services.postgres_db import PostgresDatabase
         db = PostgresDatabase()
@@ -177,9 +190,9 @@ def google_login(payload: GoogleLoginRequest, request: Request):
                 else:
                     # New user from Google Sign In: prompt for mobile number and business name
                     needs_onboarding = True
-        except Exception as e:
-            logging.warning("Database lookup during auth for %s: %s (using graceful fallback)", email, e)
-            needs_onboarding = True
+        except Exception as exc:
+            raise unavailable(logger, "auth.merchant_lookup", exc,
+                              "Merchant account lookup unavailable") from None
 
     request.session.clear()
     csrf_token = secrets.token_urlsafe(32)
@@ -230,6 +243,21 @@ def onboard(payload: OnboardRequest, request: Request):
     merchant_id = request.session.get("merchant_id")
     picture = request.session.get("picture", "")
 
+    if settings.DATABASE_BACKEND == "postgres" and not settings.DATABASE_URL:
+        raise unavailable(
+            logger,
+            "auth.database_configuration",
+            RuntimeError("database configuration unavailable"),
+            "Merchant setup unavailable",
+        ) from None
+    if settings.is_production and settings.DATABASE_BACKEND != "postgres":
+        raise unavailable(
+            logger,
+            "auth.database_configuration",
+            RuntimeError("unsupported production database backend"),
+            "Merchant setup unavailable",
+        ) from None
+
     if settings.DATABASE_BACKEND == "postgres" and settings.DATABASE_URL:
         from app.services.postgres_db import PostgresDatabase
         db = PostgresDatabase()
@@ -273,10 +301,10 @@ def onboard(payload: OnboardRequest, request: Request):
                 conn.commit()
         except HTTPException:
             raise
-        except Exception as e:
-            logging.error("Failed to persist merchant onboarding in PostgreSQL: %s", e)
-            if not merchant_id:
-                merchant_id = str(uuid4())
+        except Exception as exc:
+            # Never claim onboarding succeeded unless the merchant row committed.
+            raise unavailable(logger, "auth.merchant_onboarding", exc,
+                              "Merchant setup unavailable") from None
     else:
         if not merchant_id or len(merchant_id) != 36:
             merchant_id = str(uuid4())

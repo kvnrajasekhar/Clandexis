@@ -182,3 +182,42 @@ def test_meta_webhook_interactive_button_click(mapped_service):
     assert msg.message_type == MessageType.INTERACTIVE_BUTTON
     assert msg.interactive_id == "CONFIRM_SALE_TXN9823"
     assert msg.interactive_title == "✅ Confirm & Bill"
+
+
+def test_meta_webhook_unregistered_sender_extraction(mapped_service):
+    raw_payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "WABA_ID_12345",
+                "changes": [
+                    {
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {
+                                "display_phone_number": "15550269999",
+                                "phone_number_id": "PHONE_NUM_ID_6789",
+                            },
+                            "messages": [
+                                {
+                                    "from": "15551234567",
+                                    "id": "wamid.UNREG_111",
+                                    "timestamp": "1732080000",
+                                    "type": "text",
+                                    "text": {"body": "Hello there"},
+                                }
+                            ],
+                        },
+                        "field": "messages",
+                    }
+                ],
+            }
+        ],
+    }
+
+    service = mapped_service
+    inbound_msgs = service.parse_webhook_payload(raw_payload)
+    assert inbound_msgs == []
+
+    unregistered = service.extract_unregistered_senders(raw_payload)
+    assert unregistered == ["+15551234567"]

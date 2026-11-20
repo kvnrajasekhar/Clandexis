@@ -112,6 +112,41 @@ class MetaWhatsAppService:
 
         return inbound_messages
 
+    def extract_unregistered_senders(self, raw_data: Dict[str, Any]) -> List[str]:
+        """
+        Extracts sender phone numbers that are not linked to an active merchant account.
+        """
+        unregistered: List[str] = []
+        try:
+            payload = MetaWebhookPayload.model_validate(raw_data)
+        except Exception:
+            return unregistered
+
+        for entry in payload.entry:
+            for change in entry.changes:
+                value = change.value
+                if not value.messages:
+                    continue
+                if self.phone_number_id and value.metadata.phone_number_id and value.metadata.phone_number_id != self.phone_number_id:
+                    continue
+
+                for msg in value.messages:
+                    sender_wa_id = msg.from_user
+                    from app.services.whatsapp_identity import normalize_phone
+                    try:
+                        sender_phone = normalize_phone(sender_wa_id)
+                    except ValueError:
+                        continue
+                    if sender_phone == normalize_phone(value.metadata.display_phone_number):
+                        continue
+                    if not re.fullmatch(r"\+[1-9][0-9]{1,14}", sender_phone):
+                        continue
+                    tenant_id = resolve_sender(sender_phone)
+                    if not tenant_id and sender_phone not in unregistered:
+                        unregistered.append(sender_phone)
+
+        return unregistered
+
     def _normalize_message(
         self,
         msg: MetaMessage,
@@ -376,15 +411,18 @@ class MetaWhatsAppService:
             "Content-Type": "application/json",
         }
         try:
+            req_content = payload.model_dump_json(exclude_none=True, by_alias=True)
+            logger.info("Dispatching Meta message to %s (type=%s)", payload.to, payload.type)
             resp = await self.http_client.post(
                 endpoint,
-                content=payload.model_dump_json(exclude_none=True, by_alias=True),
+                content=req_content,
                 headers=headers,
             )
+            logger.info("Meta Graph API response (HTTP %s): %s", resp.status_code, resp.text)
             if resp.status_code >= 400:
-                logger.error("Meta Graph API error (HTTP %s)", resp.status_code)
+                logger.error("Meta Graph API error (HTTP %s): %s", resp.status_code, resp.text)
                 return None
             return MetaSendResponse.model_validate(resp.json())
         except Exception as e:
-            logger.error("Meta dispatch failed (%s)", type(e).__name__)
+            logger.error("Meta dispatch failed (%s): %s", type(e).__name__, e, exc_info=True)
             return None

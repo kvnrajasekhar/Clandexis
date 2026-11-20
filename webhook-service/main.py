@@ -142,7 +142,21 @@ async def handle_meta_webhook(
         except Exception as e:
             logger.error(f"Failed to process message {msg.message_id}: {e}", exc_info=True)
 
-    return {"status": "ok", "messages_received": len(inbound_messages)}
+    # 3. Handle unregistered senders
+    unregistered_senders = meta_service.extract_unregistered_senders(raw_json)
+    for sender_phone in unregistered_senders:
+        logger.info(f"Received message from unregistered sender: {sender_phone}")
+        unregistered_notice = (
+            f"👋 Welcome to Clandexis ERP! Your number ({sender_phone}) is not yet linked to an active merchant account. "
+            f"Please sign in to the [Clandexis Dashboard](https://clandexis-git-972287329524.asia-south2.run.app/dashboard/) to register your business."
+        )
+        try:
+            resp = await meta_service.send_text_message(sender_phone, unregistered_notice)
+            logger.info("Sent unregistered onboarding notice to %s (resp=%s)", sender_phone, resp)
+        except Exception as e:
+            logger.error(f"Failed to send unregistered notice to {sender_phone}: {e}", exc_info=True)
+
+    return {"status": "ok", "messages_received": len(inbound_messages) + len(unregistered_senders)}
 
 
 async def process_inbound_message(message: InboundMessage):
