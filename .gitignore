@@ -57,3 +57,6 @@ dashboard/.env.local
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Brag video work frames
+brag-output/work/

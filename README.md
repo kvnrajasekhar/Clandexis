@@ -4,6 +4,16 @@ A conversational ERP demo for Indian textile MSMEs. Merchants describe a transac
 
 One approved WhatsApp sender phone maps to one independent merchant account. PostgreSQL supports the current local application. The Firestore backend remains available for existing environments and regression testing.
 
+<div align="center">
+
+[![Clandexis Invisible ERP Demo](docs/assets/clandexis_demo.gif)](docs/assets/clandexis_demo.mp4)
+
+*🎥 **20-Second Product Demo**: Vernacular WhatsApp Inbound ➔ Gemini Schema 1.1 Extraction ➔ 1-Tap Safety Gate ➔ Atomic PostgreSQL Ledger Commit ➔ Live Judge Dashboard*
+
+[**▶ Watch Full HD 1080p Video with Audio (`docs/assets/clandexis_demo.mp4`)**](docs/assets/clandexis_demo.mp4)
+
+</div>
+
 ## Current status
 
 | Area | Verified state |

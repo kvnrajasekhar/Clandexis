@@ -1,0 +1,3 @@
+Most of Bharat's 63 million MSMEs don't use ERP software — they run their daily business on WhatsApp chats and paper notebooks. 
+
+Meet Clandexis: an invisible, voice-first ERP that turns conversational Hindi, Telugu, and English WhatsApp messages into auditable double-entry accounting records, customer khata statements, and live PostgreSQL dashboards with zero app downloads. Powered by Google Gemini 3.5/3.8 and PostgreSQL 17.
