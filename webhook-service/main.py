@@ -128,7 +128,7 @@ async def handle_meta_webhook(
     if not meta_service:
         raise HTTPException(status_code=500, detail="WhatsApp service not ready")
 
-    # 2. Parse and normalize
+    # 2. Parse and normalize registered messages
     inbound_messages = meta_service.parse_webhook_payload(raw_json)
     
     for msg in inbound_messages:
@@ -142,7 +142,39 @@ async def handle_meta_webhook(
         except Exception as e:
             logger.error(f"Failed to process message {msg.message_id}: {e}", exc_info=True)
 
-    return {"status": "ok", "messages_received": len(inbound_messages)}
+    # 3. Handle unregistered senders via dynamic WhatsApp onboarding workflow
+    unregistered_messages = meta_service.parse_unregistered_inbound_messages(raw_json)
+    for unreg_msg in unregistered_messages:
+        logger.info(
+            f"Received Onboarding InboundMessage: id={unreg_msg.message_id}, type={unreg_msg.message_type}, "
+            f"sender={unreg_msg.sender_phone}, interactive_id={unreg_msg.interactive_id}"
+        )
+        try:
+            await process_onboarding_message(unreg_msg)
+        except Exception as e:
+            logger.error(f"Failed to process onboarding message {unreg_msg.message_id}: {e}", exc_info=True)
+
+    total_received = len(inbound_messages) + len(unregistered_messages)
+    return {"status": "ok", "messages_received": total_received}
+
+
+async def process_onboarding_message(message: InboundMessage):
+    """
+    Background worker passing unapproved / unregistered merchant message to Onboarding State Machine.
+    """
+    logger.info(f"Processing onboarding message {message.message_id} for {message.sender_phone}...")
+    try:
+        from app.services.merchant_onboarding import MerchantOnboardingService
+        service = MerchantOnboardingService()
+        media_bytes = None
+        if message.message_type in (MessageType.AUDIO, MessageType.IMAGE, MessageType.DOCUMENT):
+            if meta_service is not None and message.media_id and message.media_mime_type:
+                media_bytes = await meta_service.download_media_bytes(message.media_id)
+        outbound = await service.handle_onboarding_message(message, media_bytes=media_bytes)
+        if meta_service and outbound:
+            await meta_service.dispatch_outbound(outbound)
+    except Exception as e:
+        logger.error(f"Onboarding flow failed for {message.sender_phone}: {e}", exc_info=True)
 
 
 async def process_inbound_message(message: InboundMessage):
