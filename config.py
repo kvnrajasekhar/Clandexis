@@ -25,10 +25,11 @@ def _meta_env(primary: str, *aliases: str):
     return next((os.environ[k] for k in (primary, *aliases) if k in os.environ), None)
 
 
-def _meta_setting(primary: str, *aliases: str, default=None):
-    """Honor an explicit empty primary value; otherwise use aliases then Secret Manager."""
-    value = _meta_env(primary, *aliases)
-    return value if value is not None else get_secret(primary, default)
+def _meta_val(primary: str, *aliases: str, default: Optional[str] = None) -> Optional[str]:
+    val = _meta_env(primary, *aliases)
+    if val is not None:
+        return val
+    return get_secret(primary, default)
 
 
 def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
@@ -82,20 +83,18 @@ class Settings(BaseModel):
     # Meta WhatsApp Business Cloud API (Graph API v21.0)
     # ==========================================================================
     META_WHATSAPP_TOKEN: Optional[str] = Field(
-        default_factory=lambda: _meta_setting("META_WHATSAPP_TOKEN", "WHATSAPP_ACCESS_TOKEN")
+        default_factory=lambda: _meta_val("META_WHATSAPP_TOKEN", "WHATSAPP_ACCESS_TOKEN")
     )
     META_PHONE_NUMBER_ID: Optional[str] = Field(
-        default_factory=lambda: _meta_setting("META_PHONE_NUMBER_ID", "WHATSAPP_PHONE_NUMBER_ID")
+        default_factory=lambda: _meta_val("META_PHONE_NUMBER_ID", "WHATSAPP_PHONE_NUMBER_ID")
     )
     WHATSAPP_DEMO_PHONE_MAP: str = Field(default_factory=lambda: os.getenv("WHATSAPP_DEMO_PHONE_MAP", "{}"))
     META_WABA_ID: Optional[str] = Field(default_factory=lambda: get_secret("META_WABA_ID"))
     META_VERIFY_TOKEN: str = Field(
-        default_factory=lambda: _meta_setting("META_VERIFY_TOKEN", "WHATSAPP_VERIFY_TOKEN", default="")
+        default_factory=lambda: _meta_val("META_VERIFY_TOKEN", "WHATSAPP_VERIFY_TOKEN", default="") or ""
     )
     META_APP_SECRET: Optional[str] = Field(
-        default_factory=lambda: _meta_setting(
-            "META_APP_SECRET", "WHATSAPP_APP_SECRET", "META-WHATSAPP_APP_SECRET"
-        )
+        default_factory=lambda: _meta_val("META_APP_SECRET", "META-WHATSAPP_APP_SECRET", "WHATSAPP_APP_SECRET")
     )
     META_API_VERSION: str = Field(default_factory=lambda: os.getenv("META_API_VERSION", "v21.0"))
     META_GRAPH_BASE_URL: str = Field(default_factory=lambda: os.getenv("META_GRAPH_BASE_URL", "https://graph.facebook.com"))
