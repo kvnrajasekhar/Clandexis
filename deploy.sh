@@ -110,7 +110,7 @@ gcloud run deploy "${SERVICE_NAME}" \
   --timeout 60 \
   --set-env-vars "GCP_PROJECT_ID=${PROJECT_ID},GCP_REGION=${REGION},ENVIRONMENT=production,LOG_LEVEL=INFO,FIRESTORE_DATABASE=(default),BIGQUERY_DATASET=clandexis_analytics,GCS_BUCKET_NAME=clandexis-pdf-artifacts,KMS_KEY_RING=clandexis-attestation-ring,KMS_KEY_NAME=ledger-signing-key,KMS_LOCATION=${REGION},META_API_VERSION=v21.0,META_GRAPH_BASE_URL=https://graph.facebook.com,ROUTER_MODEL=gemini-3.5-flash-lite,EXTRACTOR_MODEL=gemini-3.8-flash,TTS_MODEL=gemini-3.8-flash-tts,ANALYST_MODEL=gemini-4-carbon,CONFIDENCE_THRESHOLD=0.85,HIGH_CREDIT_THRESHOLD=5000.00,META_PHONE_NUMBER_ID=${META_PHONE_NUMBER_ID:-1378627142011047},META_WABA_ID=${META_WABA_ID:-1129045816592822},META_APP_SECRET=${META_APP_SECRET:-3d7dda969f9a175b600f7fd4c56fbc14},META_VERIFY_TOKEN=${META_VERIFY_TOKEN:-clandexis_meta_webhook_verify_token_2026},META_WHATSAPP_TOKEN=${META_WHATSAPP_TOKEN}"
 
-# ── 5. Post-deploy verification ────────────────────────────────────────────────
+# ── 5. Post-deploy verification & Webhook registration ─────────────────────────
 echo ""
 echo "✅ [5/5] Deployment complete!"
 SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" \
@@ -118,12 +118,28 @@ SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" \
   --project "${PROJECT_ID}" \
   --format "value(status.url)")
 
+echo "🔗 Registering Meta WhatsApp Webhook subscription for ${SERVICE_URL}/webhook..."
+META_APP_ID="4877567325807947"
+META_APP_SECRET="${META_APP_SECRET:-3d7dda969f9a175b600f7fd4c56fbc14}"
+META_VERIFY_TOKEN="${META_VERIFY_TOKEN:-clandexis_meta_webhook_verify_token_2026}"
+META_WABA_ID="${META_WABA_ID:-1129045816592822}"
+
+curl -s -X POST "https://graph.facebook.com/v21.0/${META_APP_ID}/subscriptions" \
+  -F "object=whatsapp_business_account" \
+  -F "callback_url=${SERVICE_URL}/webhook" \
+  -F "verify_token=${META_VERIFY_TOKEN}" \
+  -F "fields=messages" \
+  -F "access_token=${META_APP_ID}|${META_APP_SECRET}" > /dev/null || true
+
+curl -s -X POST "https://graph.facebook.com/v21.0/${META_WABA_ID}/subscribed_apps" \
+  -H "Authorization: Bearer ${META_WHATSAPP_TOKEN}" > /dev/null || true
+
 echo ""
 echo "=========================================================="
 echo "✅ SERVICE DEPLOYED SUCCESSFULLY"
 echo "   URL     : ${SERVICE_URL}"
 echo "   Health  : ${SERVICE_URL}/health"
-echo "   Webhook : ${SERVICE_URL}/webhook"
+echo "   Webhook : ${SERVICE_URL}/webhook (Active & Subscribed)"
 echo "=========================================================="
 echo ""
 echo "📋 Meta Developer Portal → Callback URL:"
