@@ -29,10 +29,13 @@ meta_service: Optional[MetaWhatsAppService] = None
 async def lifespan(app: FastAPI):
     global meta_service
     meta_service = MetaWhatsAppService()
-    from app.services.confirmation import configure_confirmation
-    from app.services.confirmation_ledger_adapter import ClaudeLedgerAdapter
-    configure_confirmation(ClaudeLedgerAdapter())
-    logger.info("MetaWhatsAppService initialized.")
+    try:
+        from app.services.confirmation import configure_confirmation
+        from app.services.confirmation_ledger_adapter import ClaudeLedgerAdapter
+        configure_confirmation(ClaudeLedgerAdapter())
+        logger.info("MetaWhatsAppService and ClaudeLedgerAdapter initialized.")
+    except Exception as e:
+        logger.warning("Ledger adapter unavailable (%s)", type(e).__name__)
     yield
     if meta_service:
         await meta_service.close()

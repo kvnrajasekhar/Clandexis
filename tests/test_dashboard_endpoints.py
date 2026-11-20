@@ -11,12 +11,8 @@ def test_webhook_service_health():
 
 def test_dashboard_api_summary_endpoint():
     res = client.get("/api/v1/dashboard/summary?merchant_id=%2B919876543210")
-    # In local test environment without Firestore emulator, returns either 200 with summary or handled error
-    assert res.status_code in [200, 500]
-    if res.status_code == 200:
-        data = res.json()
-        assert "merchant_id" in data
-        assert "total_sales" in data
+    assert res.status_code == 401
+
 
 def test_dashboard_static_mount():
     res = client.get("/dashboard/")

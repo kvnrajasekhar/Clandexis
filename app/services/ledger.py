@@ -27,11 +27,12 @@ Design rules (see docs/LEDGER_INTERFACE.md):
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import logging
+import random
 import re
+import time as time_module
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -39,7 +40,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from google.api_core.exceptions import AlreadyExists
+from google.api_core.exceptions import Aborted, AlreadyExists
 from google.cloud import firestore
 from pydantic import BaseModel, Field
 
@@ -328,6 +329,20 @@ def get_db() -> firestore.Client:
     if _client is None:
         _client = firestore.Client(project=settings.GCP_PROJECT_ID, database=settings.FIRESTORE_DATABASE)
     return _client
+
+
+def _run_txn(db, fn, outer_attempts: int = 4):
+    """Run a @firestore.transactional callable. Firestore retries Aborted internally; if heavy
+    contention exhausts those retries we retry the whole (idempotent, re-reading) operation with
+    jittered backoff instead of surfacing a spurious failure to the caller."""
+    for attempt in range(outer_attempts):
+        try:
+            return fn(db.transaction(max_attempts=10))
+        except (ValueError, Aborted) as exc:
+            exhausted = isinstance(exc, Aborted) or "Failed to commit transaction" in str(exc)
+            if not exhausted or attempt == outer_attempts - 1:
+                raise
+            time_module.sleep(random.uniform(0.05, 0.25) * (attempt + 1))
 
 
 def _require_str(name: str, value: Optional[str]) -> str:
@@ -842,7 +857,7 @@ def confirm_and_commit(
             confirmed_by, request_id, expected_snapshot_sha256, now, today_ist,
         )
 
-    outcome = _txn(db.transaction())
+    outcome = _run_txn(db, _txn)
     kind = outcome["kind"]
     if kind == "POSTED":
         return CommitResult(**outcome["result"])
@@ -1198,7 +1213,7 @@ def cancel_candidate(
         })
         return ("OK", PostingStatus.CANCELLED.value, None)
 
-    outcome, st, txn_id = _txn(db.transaction())
+    outcome, st, txn_id = _run_txn(db, _txn)
     if outcome == "NOT_FOUND":
         raise CandidateNotFoundError(f"Candidate {candidate_id} not found for merchant")
     if outcome == "INVALID":
@@ -1297,7 +1312,7 @@ def review_candidate(
         transaction.update(ref, update)
         return {"kind": "OK", "expires_at": d.get("expires_at")}
 
-    out = _txn(db.transaction())
+    out = _run_txn(db, _txn)
     k = out["kind"]
     if k == "NOT_FOUND":
         raise CandidateNotFoundError(f"Candidate {candidate_id} not found for merchant")
@@ -1389,7 +1404,7 @@ def post_opening_balance(
         transaction.update(party_ref, {"udhaar_balance_minor": bal_minor, "ar_posted_minor": bal_minor})
         return ("POSTED", unposted)
 
-    kind, minor = _txn(db.transaction())
+    kind, minor = _run_txn(db, _txn)
     if kind == "NO_PARTY":
         raise PartyNotFoundError(f"Party {party_id} not found")
     if kind == "DISCREPANCY":

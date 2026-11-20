@@ -65,7 +65,7 @@ The existing adapter parses this; `ConfirmationService.parse_reply` validates th
 
 Staging requests a 30-minute expiry. Retry staging is idempotent on merchant, source event and candidate index and preserves the original persisted ID/expiry. Expired pending candidates fail. Repeated Confirm on a committed candidate returns its original transaction. Repeated Cancel remains cancelled. Confirm after Cancel and Cancel after commit fail. A callback reused for a different candidate must raise Claude's `IdempotencyConflictError`.
 
-## Review gate and remaining Claude dependency
+## Review gate and Claude integration
 
 ACCEPTED candidates are revalidated on a copy with the existing `BusinessValidator` before commit. REJECTED candidates cannot confirm or be reviewed into approval: submit a new corrected candidate. NEEDS_REVIEW, missing fields, clarification flags and unresolved original review flags block posting. A normal Confirm tap does not constitute review.
 
@@ -83,7 +83,7 @@ reviewed = get_confirmation_service().resolve_review(
 # Still unposted. A subsequent Confirm uses the persisted reviewed candidate.
 ```
 
-The bridge clears old clarification/review flags on the supplied complete facts and runs the existing validator again; unresolved deterministic warnings or missing fields still block. This method works with the test interface stub. **Claude's current ledger has no `review_candidate` method**, so the production adapter fails closed with an explicit message to submit corrected details as a new candidate. It never directly overwrites a ledger snapshot. Required extension (owned by Claude):
+The bridge clears old clarification/review flags on the supplied complete facts and runs the existing validator again; unresolved deterministic warnings or missing fields still block. Claude's current ledger provides the atomic `review_candidate` method, and the production adapter calls it with the exact signature below. Real emulator tests cover this review-to-confirm path. The bridge never directly overwrites a ledger snapshot:
 
 ```python
 review_candidate(
@@ -99,7 +99,7 @@ review_candidate(
 )
 ```
 
-Required atomic behavior: authorize reviewer, check tenant, pending state, expiry and expected hash; reject original REJECTED or terminal candidates; revalidate corrected facts; preserve the original snapshot/review provenance and append audit history; persist the reviewed snapshot with its new hash and `review_resolved=True`; retain immutable `originally_needs_review=True` when review was originally required; never post as part of review. Confirmation must recheck these gates atomically. Return value is not used: the adapter re-reads the persisted candidate.
+Ledger atomic behavior: authorize reviewer, check tenant, pending state, expiry and expected hash; reject original REJECTED or terminal candidates; revalidate corrected facts; preserve the original snapshot/review provenance and append audit history; persist the reviewed snapshot with its new hash and `review_resolved=True`; retain immutable `originally_needs_review=True` when review was originally required; never post as part of review. Confirmation must recheck these gates atomically. Return value is not used: the adapter re-reads the persisted candidate.
 
 ## Exact existing ledger dependencies
 
@@ -114,7 +114,7 @@ Required atomic behavior: authorize reviewer, check tenant, pending state, expir
 | `get_transaction(merchant_id, txn_id, *, db)` | Read committed transaction and referenced movement IDs |
 | `LedgerError` and subclasses | Translate known application failures into safe confirmation errors |
 
-The adapter reads `merchants/{merchant_id}/transaction_candidates/{candidate_id}` with `extracted_snapshot`, `snapshot_sha256`, `expires_at`, `posting_status`, `validation_status`, and future review metadata. It maps `PENDING_CONFIRMATION` to `AWAITING_CONFIRMATION`, `POSTED` to `COMMITTED`, and retains terminal states. Existing NEEDS_REVIEW ledger holds remain blocked by the application gate.
+The adapter reads `merchants/{merchant_id}/transaction_candidates/{candidate_id}` with `extracted_snapshot`, `snapshot_sha256`, `expires_at`, `posting_status`, `validation_status`, and persisted review metadata. It maps `PENDING_CONFIRMATION` to `AWAITING_CONFIRMATION`, `POSTED` to `COMMITTED`, and retains terminal states. Existing NEEDS_REVIEW ledger holds remain blocked by the application gate.
 
 `CommitResult` must contain matching merchant ID, `txn_id`, `status="COMMITTED"`, `received_amount`, and `credit_amount`. Paid/credit in the response come from this persisted commit result. Inventory balances come from the committed transaction's ordered `movement_ids`, reading each movement's `sku_id`, `reference_txn_id` and `balance_after`. This returns the balance at posting even on a later duplicate callback, rather than querying current stock. Credit outstanding means credit on this transaction; it is not the party's aggregate preexisting debt.
 
@@ -148,7 +148,7 @@ outbound = OutboundMessage(
 # await meta_service.dispatch_outbound(outbound) -- after every DB callback returns
 ```
 
-This is an application interface, not a public HTTP endpoint. Automatic upload/WhatsApp PDF delivery remains the sender owner's integration; local filesystem paths are not valid Meta document URLs. A Cloud Run ephemeral filesystem is not durable storage: inject an object-store implementation or mount a durable volume. Do not change Meta tokens or credential logic to generate PDFs.
+The webhook worker now automatically runs `generate_posting_document` after a committed result, sends the posting response, and dispatches a document when a fetchable URL is available. Dashboard confirmation invokes the same document flow. Default storage is GCS with immutable uploads and short-lived signed URLs; `INVOICE_LOCAL_ROOT` selects development or durable-volume storage without an automatic public URL. Local filesystem paths are not valid Meta document URLs. Signing or storage failures return `PENDING_RETRY` and do not undo the sale. Meta credentials are unchanged.
 
 `InvoiceService` accepts only an authoritative `InvoiceRepository.get_committed_sale(merchant_id, transaction_id)` read model, revalidates it, verifies tenant/transaction ownership, and requires `COMMITTED` + `SALE_INVOICE`. It does not accept an extraction request body. The included Firestore repository reads Claude's committed transaction plus the merchant's database record. Missing/inconsistent database amounts fail instead of being invented.
 
@@ -177,8 +177,6 @@ Run from `team_clandexis`:
 PYTHONPATH=. .venv/bin/python -m pytest tests -q
 ```
 
-Validated on 2026-11-20: **50 passed, 1 skipped**. The skipped suite belongs to the ledger owner and requires `FIRESTORE_EMULATOR_HOST`. Existing pytest-asyncio emits a fixture-scope deprecation warning.
-
-Coverage includes one commit, duplicate/concurrent callbacks, cancellation, tenant rejection, expiry, invalid IDs, safe YES/NO ambiguity, review/correction/revalidation, persisted ID reuse, real Meta adapter normalization without extraction, actual Claude API argument mapping, committed movement balances, committed minor-unit PDF totals, ownership/state/amount failures, repeatable artifact bytes, storage and association failures without undoing a sale. Stub concurrency tests verify bridge behavior against the atomic contract; they are not evidence of real Firestore ACID behavior. Run Claude's emulator suite before production rollout.
+The P0 integration suite now runs against the actual Firestore emulator, including HTTP sessions, callback routing, sale/repayment/review, duplicate callbacks, real ReportLab PDFs, artifact association, and outgoing message recording. See [P0_APPLICATION_INTEGRATION.md](P0_APPLICATION_INTEGRATION.md) for the latest results, authentication setup, deployment dependencies, and exact run command. Only external Meta delivery is recorded in tests; no test messages are sent to real customers.
 
 Synthetic fixture previews (not real customer invoices) were generated in `output/pdf/committed-basic-invoice-inr.pdf` and `output/pdf/committed-basic-invoice-usd.pdf`: 32 items, long merchant/buyer names, five pages each. All ten pages were rendered with Poppler and visually inspected for wrapping, row breaks, repeated headers, totals and footers. ReportLab's [table documentation](https://docs.reportlab.com/reportlab/userguide/ch7_tables/) informs the repeating/splitting table layout.

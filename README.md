@@ -139,4 +139,6 @@ python3 seed/seed_textile_msme.py --dry-run
 
 ## Confirmation and PDF integration
 
-See [CONFIRMATION_PDF_INTERFACE.md](docs/CONFIRMATION_PDF_INTERFACE.md) for application APIs, Claude ledger dependencies, the pending atomic review extension, sender integration, retry guarantees and tests. Install `requirements-dev.txt` to run PDF inspection tests. Confirmations use persisted candidates and committed database results; extraction alone never means a sale was posted.
+See [CONFIRMATION_PDF_INTERFACE.md](docs/CONFIRMATION_PDF_INTERFACE.md) for application APIs, Claude ledger dependencies, atomic review and session authentication, sender integration, retry guarantees and tests. Install `requirements-dev.txt` to run PDF inspection tests. Confirmations use persisted candidates and committed database results; extraction alone never means a sale was posted.
+
+See [P0 application integration](docs/P0_APPLICATION_INTEGRATION.md) for security configuration, real-emulator verification and post-commit invoice delivery.

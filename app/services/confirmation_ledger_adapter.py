@@ -47,7 +47,7 @@ class ClaudeLedgerAdapter:
             result = self.api.stage_candidate(merchant_id, source_event_id, candidate,
                 candidate_index=index, ttl=expires_at - now, db=self.db, now=now)
         except self.api.LedgerError as exc:
-            raise ConfirmationError(str(exc)) from exc
+            raise ConfirmationError("Candidate unavailable, expired or requires review.") from exc
         return self.get_candidate(merchant_id, result.candidate_id)
 
     def active_candidates(self, merchant_id, now):
@@ -70,7 +70,7 @@ class ClaudeLedgerAdapter:
                    corrected_candidate=candidate, review_note=review_note,
                    expected_snapshot_sha256=expected_revision, db=self.db, now=now)
         except self.api.LedgerError as exc:
-            raise ConfirmationError(str(exc)) from exc
+            raise ConfirmationError("Candidate unavailable, expired or requires review.") from exc
         return self.get_candidate(merchant_id, candidate_id)
 
     def confirm_candidate(self, merchant_id, candidate_id, source_event_id, expected_revision, now):
@@ -80,7 +80,7 @@ class ClaudeLedgerAdapter:
                 confirmation_request_id=source_event_id,
                 expected_snapshot_sha256=expected_revision, db=self.db, now=now)
         except self.api.LedgerError as exc:
-            raise ConfirmationError(str(exc)) from exc
+            raise ConfirmationError("Candidate unavailable, expired or requires review.") from exc
         if result.merchant_id != merchant_id or result.status != "COMMITTED":
             raise RuntimeError("Ledger returned an invalid commit result")
         # Read persisted movements referenced by this transaction. This gives stock
@@ -103,5 +103,5 @@ class ClaudeLedgerAdapter:
             result = self.api.cancel_candidate(merchant_id, candidate_id, cancelled_by=merchant_id,
                                                reason=f"Callback {source_event_id}", db=self.db, now=now)
         except self.api.LedgerError as exc:
-            raise ConfirmationError(str(exc)) from exc
+            raise ConfirmationError("Candidate unavailable, expired or requires review.") from exc
         return result.posting_status.value

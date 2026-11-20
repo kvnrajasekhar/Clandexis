@@ -1,5 +1,6 @@
 """Restricted demo sessions and service authentication; identity never comes from a body."""
 import hmac
+import logging
 import secrets
 from dataclasses import dataclass
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -82,7 +83,19 @@ def logout(request: Request, identity: SessionIdentity = Depends(dashboard_ident
     return {"status": "logged_out"}
 
 
+class NoQueryAccessLog(logging.Filter):
+    def filter(self, record):
+        # Uvicorn normally logs full request URLs, including hub.verify_token.
+        if isinstance(record.args, tuple) and len(record.args) == 5:
+            args = list(record.args)
+            args[2] = str(args[2]).partition("?")[0]
+            record.args = tuple(args)
+        return True
+
+
 def install_security(app):
+    logging.getLogger("uvicorn.access").addFilter(NoQueryAccessLog())
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     app.add_middleware(SessionMiddleware,
         secret_key=settings.DASHBOARD_SESSION_SECRET or secrets.token_urlsafe(48),
         session_cookie="clandexis_session", max_age=3600, same_site="strict",

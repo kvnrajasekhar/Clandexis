@@ -6,4 +6,4 @@ cd "$(dirname "$0")/.."
 FIREBASE_BIN="${FIREBASE_BIN:-firebase}"
 PY="${PYTHON:-.venv/bin/python}"
 "$FIREBASE_BIN" emulators:exec --only firestore --project demo-clandexis \
-  "$PY -m pytest tests/test_ledger_emulator.py tests/test_ledger_adapter_dashboard_integration.py -v ${*:-}"
+  "PYTHONPATH=. $PY -m pytest tests -v ${*:-}"

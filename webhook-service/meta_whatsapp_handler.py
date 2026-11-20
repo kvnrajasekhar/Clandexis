@@ -59,7 +59,7 @@ class MetaWhatsAppService:
         try:
             payload = MetaWebhookPayload.model_validate(raw_data)
         except Exception as e:
-            logger.error(f"Failed to validate Meta webhook schema: {e}")
+            logger.error("Invalid Meta webhook schema")
             return inbound_messages
 
         for entry in payload.entry:
@@ -173,7 +173,7 @@ class MetaWhatsAppService:
             data = resp.json()
             return data.get("url")
         except Exception as e:
-            logger.error(f"Error fetching media URL for {media_id}: {e}")
+            logger.error("Media URL retrieval failed (%s)", type(e).__name__)
             return None
 
     async def download_media_bytes(self, media_id: str) -> Optional[bytes]:
@@ -190,7 +190,7 @@ class MetaWhatsAppService:
             resp.raise_for_status()
             return resp.content
         except Exception as e:
-            logger.error(f"Error downloading media content from {download_url}: {e}")
+            logger.error("Media download failed (%s)", type(e).__name__)
             return None
 
     # ==========================================================================
@@ -334,7 +334,7 @@ class MetaWhatsAppService:
             resp = await self.http_client.post(endpoint, json=body, headers=headers)
             return resp.status_code == 200
         except Exception as e:
-            logger.warning(f"Could not mark message {message_id} as read: {e}")
+            logger.warning("Read receipt failed (%s)", type(e).__name__)
             return False
 
     async def _post_message(self, payload: MetaSendMessageRequest) -> Optional[MetaSendResponse]:
@@ -353,9 +353,9 @@ class MetaWhatsAppService:
                 headers=headers,
             )
             if resp.status_code >= 400:
-                logger.error(f"Meta Graph API error [{resp.status_code}]: {resp.text}")
+                logger.error("Meta Graph API error (HTTP %s)", resp.status_code)
                 return None
             return MetaSendResponse.model_validate(resp.json())
         except Exception as e:
-            logger.error(f"Failed to post outbound message to Meta WhatsApp: {e}")
+            logger.error("Meta dispatch failed (%s)", type(e).__name__)
             return None

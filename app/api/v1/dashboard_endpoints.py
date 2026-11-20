@@ -16,7 +16,7 @@ from app.services.confirmation import AuthenticatedMerchant, ConfirmationError, 
 from app.services.posting_flow import generate_posting_document
 from uuid import uuid4
 
-router = APIRouter(prefix="/dashboard", tags=["Judge & Merchant Dashboard"])
+router = APIRouter(prefix="/dashboard", tags=["Judge & Merchant Dashboard"], dependencies=[Depends(dashboard_identity)])
 
 def _to_json_compatible(obj: Any) -> Any:
     """Recursively convert Decimals and dataclasses to JSON-serializable primitives."""
