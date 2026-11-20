@@ -1,0 +1,39 @@
+# Byte-compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local env — NEVER ship secrets to the container
+.env
+.env.*
+!.env.example
+
+# IDE & OS artefacts
+.idea/
+.vscode/
+*.DS_Store
+*.swp
+
+# Git
+.git/
+.gitignore
+
+# Docs & scratch
+docs/
+*.md
+seed/
+
+# Agent config (not needed at runtime)
+.agents/
+mcp.json
