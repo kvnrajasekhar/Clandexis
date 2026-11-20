@@ -6,6 +6,7 @@ without duplicating any ledger logic.
 """
 
 from decimal import Decimal
+import logging
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -15,8 +16,10 @@ from app.core.security import SessionIdentity, dashboard_identity
 from app.services.confirmation import AuthenticatedMerchant, ConfirmationError, handle_confirmation
 from app.services.posting_flow import generate_posting_document
 from uuid import uuid4
+from app.core.observability import unavailable
 
 router = APIRouter(prefix="/dashboard", tags=["Judge & Merchant Dashboard"], dependencies=[Depends(dashboard_identity)])
+logger = logging.getLogger(__name__)
 
 def _to_json_compatible(obj: Any) -> Any:
     """Recursively convert Decimals and dataclasses to JSON-serializable primitives."""
@@ -46,8 +49,8 @@ def get_dashboard_summary(
         return _to_json_compatible(summary)
     except ledger.MerchantNotFoundError:
         raise HTTPException(status_code=404, detail="Merchant not found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Dashboard operation failed")
+    except Exception as exc:
+        raise unavailable(logger, "dashboard.summary", exc, "Dashboard operation failed") from None
 
 
 @router.get("/inventory", summary="Get Live Inventory Levels")
@@ -65,8 +68,8 @@ def get_dashboard_inventory(
         return _to_json_compatible(items)
     except ledger.MerchantNotFoundError:
         raise HTTPException(status_code=404, detail="Merchant not found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Dashboard operation failed")
+    except Exception as exc:
+        raise unavailable(logger, "dashboard.inventory", exc, "Dashboard operation failed") from None
 
 
 @router.get("/parties", summary="Get Counterparties and Credit Balances")
@@ -80,8 +83,8 @@ def get_dashboard_parties(
     merchant_id = identity.merchant_id
     try:
         return _to_json_compatible(ledger.list_parties(merchant_id))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Dashboard operation failed")
+    except Exception as exc:
+        raise unavailable(logger, "dashboard.parties", exc, "Dashboard operation failed") from None
 
 
 @router.get("/transactions", summary="List Committed Transactions")
@@ -97,8 +100,8 @@ def get_dashboard_transactions(
     try:
         txns = ledger.list_transactions(merchant_id=merchant_id, limit=limit)
         return _to_json_compatible(txns)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Dashboard operation failed")
+    except Exception as exc:
+        raise unavailable(logger, "dashboard.transactions", exc, "Dashboard operation failed") from None
 
 
 @router.get("/candidates", summary="List Staged Candidates for Review")
@@ -118,8 +121,8 @@ def get_dashboard_candidates(
                 if row.get(key):
                     row[key] = row[key].isoformat()
         return _to_json_compatible(candidates)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Dashboard operation failed")
+    except Exception as exc:
+        raise unavailable(logger, "dashboard.candidates", exc, "Dashboard operation failed") from None
 
 
 class ActionCandidateRequest(BaseModel):
@@ -146,8 +149,9 @@ def _action(payload, identity, action):
         return response
     except ConfirmationError:
         raise HTTPException(409, "Candidate unavailable, expired or requires review")
-    except Exception:
-        raise HTTPException(500, "Dashboard operation failed")
+    except Exception as exc:
+        raise unavailable(logger, f"dashboard.candidate_{action}", exc,
+                          "Dashboard operation failed") from None
 
 
 @router.post("/candidates/confirm", summary="Authorize & Commit a Staged Candidate")
