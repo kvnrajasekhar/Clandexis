@@ -188,3 +188,48 @@ def confirm_dashboard_candidate(payload: ActionCandidateRequest,
 def cancel_dashboard_candidate(payload: ActionCandidateRequest,
                                identity: SessionIdentity = Depends(dashboard_identity)):
     return _action(payload, identity, "cancel")
+
+from app.schemas.transaction import TransactionCandidate
+from app.services.confirmation import get_confirmation_service
+from fastapi.responses import FileResponse, RedirectResponse
+from pathlib import Path
+from config import settings
+from pdf_service import InvoiceArtifact
+from pdf_service.gcs_store import GCSArtifactStore
+
+
+class ReviewRequest(BaseModel):
+    candidate: TransactionCandidate
+    note: str = Field(min_length=1)
+
+
+@router.post("/candidates/{candidate_id}/review")
+def review_candidate(candidate_id: str, payload: ReviewRequest,
+                     identity: SessionIdentity = Depends(dashboard_identity)):
+    try:
+        row = get_confirmation_service().resolve_review(AuthenticatedMerchant(identity.merchant_id),
+            candidate_id, payload.candidate, payload.note)
+    except ConfirmationError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"candidate_id": row.candidate_id, "review_resolved": row.review_resolved}
+
+
+@router.get("/transactions/{txn_id}/invoice")
+def download_invoice(txn_id: str, identity: SessionIdentity = Depends(dashboard_identity)):
+    ref = ledger.get_db().collection("merchants").document(identity.merchant_id).collection("transactions").document(txn_id)
+    tx = ref.get().to_dict() or {}
+    if tx.get("status") != "COMMITTED" or tx.get("intent") != "SALE_INVOICE" or tx.get("merchant_id") != identity.merchant_id:
+        raise HTTPException(404, "Committed sale unavailable")
+    data = ref.collection("invoice_artifacts").document("basic_v1").get().to_dict()
+    if not data:
+        raise HTTPException(404, "Invoice unavailable")
+    artifact = InvoiceArtifact.model_validate(data)
+    if artifact.merchant_id != identity.merchant_id or artifact.transaction_id != txn_id:
+        raise HTTPException(404, "Invoice unavailable")
+    if settings.INVOICE_LOCAL_ROOT:
+        root = Path(settings.INVOICE_LOCAL_ROOT).resolve()
+        path = (root / artifact.storage_key).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            raise HTTPException(404, "Invoice unavailable")
+        return FileResponse(path, media_type="application/pdf", filename=artifact.filename)
+    return RedirectResponse(GCSArtifactStore(settings.GCS_BUCKET_NAME).document_url(artifact))

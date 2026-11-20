@@ -60,7 +60,8 @@ export default function App() {
   const [actionMessage, setActionMessage] = useState(null);
 
   // Demo Extractor Form state
-  const [demoText, setDemoText] = useState("Ramesh ki 50 cotton shirts 200 each ki ammamu. 5000 cash, 5000 udhar.");
+  const [demoText, setDemoText] = useState("Sold 50 Cotton Shirt (L) to Suresh Traders at INR 200 each, total INR 10000. Received INR 2000 by UPI. Remaining INR 8000 on credit.");
+  const [audioFile, setAudioFile] = useState(null);
   const [demoLoading, setDemoLoading] = useState(false);
   const [demoResult, setDemoResult] = useState(null);
 
@@ -144,17 +145,19 @@ export default function App() {
     setDemoLoading(true);
     setDemoResult(null);
     try {
-      const res = await apiFetch('/api/v1/extract/text', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          merchant_id: MERCHANT_ID,
-          message_id: `demo_${Date.now()}`,
-          raw_text: demoText,
-          merchant_business_name: "Sri Balaji Textiles"
-        })
-      });
-      const data = await res.json();
+      const fields = { merchant_id: MERCHANT_ID, message_id: crypto.randomUUID(),
+        merchant_business_name: "Sri Balaji Textiles", stage: true };
+      let response;
+      if (audioFile) {
+        const form = new FormData();
+        Object.entries(fields).forEach(([key, value]) => form.append(key, value));
+        form.append('file', audioFile);
+        response = await apiFetch('/api/v1/extract/media', {method: 'POST', body: form});
+      } else {
+        response = await apiFetch('/api/v1/extract/text', {method: 'POST',
+          headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...fields, raw_text: demoText})});
+      }
+      const data = await response.json();
       setDemoResult(data);
       fetchData();
     } catch (err) {
@@ -257,7 +260,7 @@ export default function App() {
                 </div>
                 <div className="mt-3">
                   <div className="text-2xl font-bold text-white tracking-tight">
-                    ₹{summary ? summary.total_sales.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '0.00'}
+                    ₹{summary ? summary.sales_total.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '0.00'}
                   </div>
                   <div className="text-xs text-slate-400 mt-1 flex items-center gap-1">
                     <span className="text-emerald-400 font-semibold">{summary ? summary.sales_count : 0}</span> sales transactions
@@ -293,10 +296,10 @@ export default function App() {
                 </div>
                 <div className="mt-3">
                   <div className="text-2xl font-bold text-amber-400 tracking-tight">
-                    ₹{summary ? summary.credit_issued.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '0.00'}
+                    ₹{summary ? summary.credit_extended.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '0.00'}
                   </div>
                   <div className="text-xs text-slate-400 mt-1">
-                    Collections: ₹{summary ? summary.udhaar_collected : 0}
+                    Collections: ₹{summary ? summary.collections_total : 0}
                   </div>
                 </div>
               </div>
@@ -311,7 +314,7 @@ export default function App() {
                 </div>
                 <div className="mt-3">
                   <div className="text-2xl font-bold text-white tracking-tight">
-                    ₹{summary ? summary.outstanding_ar.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '0.00'}
+                    ₹{summary ? summary.total_receivables_outstanding.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '0.00'}
                   </div>
                   <div className="text-xs text-slate-400 mt-1">
                     Across {parties.length} counterparties
@@ -399,6 +402,25 @@ export default function App() {
                             </div>
                           )}
 
+                          {(cand.posting_status === 'NEEDS_REVIEW' || cand.validation_status === 'NEEDS_REVIEW') && (
+                            <form key={cand.candidate_id} onSubmit={async e => {
+                              e.preventDefault();
+                              const values = new FormData(e.currentTarget);
+                              try {
+                                const response = await apiFetch(`/api/v1/dashboard/candidates/${cand.candidate_id}/review`, {
+                                  method: 'POST', headers: {'Content-Type': 'application/json'},
+                                  body: JSON.stringify({candidate: JSON.parse(values.get('facts')), note: values.get('note')})
+                                });
+                                const body = await response.json();
+                                setActionMessage({type: response.ok ? 'info' : 'error', text: body.review_resolved ? 'Review saved. Check details and confirm.' : body.detail || 'Still requires review.'});
+                                fetchData();
+                              } catch { setActionMessage({type:'error', text:'Enter valid transaction JSON.'}); }
+                            }}>
+                              <label>Review extracted facts<textarea className="block w-full bg-slate-800" name="facts" defaultValue={JSON.stringify(cand.extracted_snapshot, null, 2)} /></label>
+                              <input className="bg-slate-800" name="note" required placeholder="What did you verify or correct?" />
+                              <button>Save review</button>
+                            </form>
+                          )}
                           {/* Safety Gate Decision Actions */}
                           <div className="flex items-center justify-end space-x-2 pt-1 border-t border-slate-800">
                             <button
@@ -553,7 +575,9 @@ export default function App() {
                 <tbody className="divide-y divide-slate-800">
                   {transactions.map((t) => (
                     <tr key={t.txn_id} className="hover:bg-slate-800/40">
-                      <td className="p-3 font-mono text-[11px] text-slate-400">{t.txn_id}</td>
+                      <td className="p-3 font-mono text-[11px] text-slate-400">{t.txn_id}
+                        {t.intent === 'SALE_INVOICE' && <a className="block underline text-sky-300" href={`/api/v1/dashboard/transactions/${encodeURIComponent(t.txn_id)}/invoice`}>Download invoice</a>}
+                      </td>
                       <td className="p-3">{t.business_date || 'Today'}</td>
                       <td className="p-3 font-semibold text-white">{t.intent}</td>
                       <td className="p-3">{t.party_id}</td>
@@ -621,6 +645,9 @@ export default function App() {
               </div>
 
               <form onSubmit={handleDemoExtract} className="space-y-4">
+                <label>Upload audio (takes precedence over text)
+                  <input type="file" accept="audio/*" onChange={e => setAudioFile(e.target.files[0])} />
+                </label>
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 mb-1">
                     Merchant Raw Input (Telugu, Hindi, English, Hinglish):
@@ -636,7 +663,7 @@ export default function App() {
 
                 <div className="flex items-center justify-between">
                   <div className="flex items-center space-x-2 text-xs text-slate-400">
-                    <span className="bg-slate-800 px-2 py-1 rounded">Model: Gemini 3.5/3.8 Flash</span>
+                    <span className="bg-slate-800 px-2 py-1 rounded">Gemini</span>
                     <span className="bg-slate-800 px-2 py-1 rounded">Decimal Arithmetic</span>
                   </div>
                   <button

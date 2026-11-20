@@ -95,7 +95,7 @@ async def verify_meta_webhook(
     """
     expected_verify_token = settings.META_VERIFY_TOKEN
     
-    if hub_mode == "subscribe" and hub_verify_token == expected_verify_token:
+    if expected_verify_token and hub_mode == "subscribe" and hub_verify_token == expected_verify_token:
         logger.info("Meta webhook verified successfully.")
         return PlainTextResponse(content=hub_challenge or "", status_code=200)
 

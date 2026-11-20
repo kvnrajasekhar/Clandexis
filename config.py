@@ -48,7 +48,7 @@ class Settings(BaseModel):
     META_PHONE_NUMBER_ID: Optional[str] = Field(default_factory=lambda: os.getenv("META_PHONE_NUMBER_ID"))
     META_WABA_ID: Optional[str] = Field(default_factory=lambda: os.getenv("META_WABA_ID"))
     META_VERIFY_TOKEN: str = Field(
-        default_factory=lambda: os.getenv("META_VERIFY_TOKEN", "clandexis_meta_webhook_verify_token_2026")
+        default_factory=lambda: os.getenv("META_VERIFY_TOKEN", "")
     )
     META_APP_SECRET: Optional[str] = Field(default_factory=lambda: os.getenv("META_APP_SECRET"))
     META_API_VERSION: str = Field(default_factory=lambda: os.getenv("META_API_VERSION", "v21.0"))

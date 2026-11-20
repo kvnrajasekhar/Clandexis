@@ -1,3 +1,4 @@
+import hashlib
 import os
 import shutil
 import tempfile
@@ -23,9 +24,22 @@ def get_pipeline():
         pipeline = PipelineService()
     return pipeline
 
+from app.services.confirmation import AuthenticatedMerchant, get_confirmation_service
+
+
+def stage_for_dashboard(result, identity):
+    if result.input_metadata.is_duplicate:
+        return
+    for index, candidate in enumerate(result.extraction.transactions):
+        if candidate.validation_status != "REJECTED" and candidate.transaction_type not in ("unknown", "query"):
+            get_confirmation_service().stage(AuthenticatedMerchant(identity.merchant_id),
+                result.input_metadata.idempotency_key, index, candidate)
+
+
 class TextExtractionRequest(BaseModel):
     merchant_id: str = Field(description="Unique merchant ID or phone number")
     message_id: Optional[str] = Field(default=None, description="WhatsApp or channel message ID")
+    stage: bool = False
     raw_text: str = Field(description="Merchant raw text message")
     merchant_business_name: Optional[str] = Field(default=None, description="Registered merchant business name")
 
@@ -46,6 +60,8 @@ async def extract_from_text(payload: TextExtractionRequest, identity: SessionIde
             raw_text=payload.raw_text,
             merchant_business_name=payload.merchant_business_name,
         )
+        if payload.stage:
+            stage_for_dashboard(result, identity)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail="Processing unavailable")
@@ -56,6 +72,7 @@ async def extract_from_media(
     message_id: Optional[str] = Form(None),
     raw_text: Optional[str] = Form(None),
     merchant_business_name: Optional[str] = Form(None),
+    stage: bool = Form(False),
     file: UploadFile = File(...),
     identity: SessionIdentity = Depends(dashboard_identity),
 ):
@@ -81,6 +98,8 @@ async def extract_from_media(
             media_path=tmp_path,
             merchant_business_name=merchant_business_name,
         )
+        if stage:
+            stage_for_dashboard(result, identity)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail="Processing unavailable")
@@ -88,13 +107,20 @@ async def extract_from_media(
         if tmp_path.exists():
             tmp_path.unlink()
 
+def speech_directory(identity):
+    tenant = hashlib.sha256(identity.merchant_id.encode()).hexdigest()
+    directory = Path(tempfile.gettempdir()) / "clandexis-speech" / tenant
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return directory.resolve()
+
+
 @router.post("/speech/synthesize", response_model=TextToSpeechResponse, summary="Text-to-Speech (TTS)")
-async def generate_speech(payload: TextToSpeechRequest):
+async def generate_speech(payload: TextToSpeechRequest, identity: SessionIdentity = Depends(dashboard_identity)):
     """
     Synthesize confirmation text or clarification question into an audio file.
     """
     try:
-        temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix=".aiff")
+        temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix=".aiff", dir=speech_directory(identity))
         temp_audio.close()
         out_path = synthesize_speech(
             text=payload.text,
@@ -110,8 +136,8 @@ async def generate_speech(payload: TextToSpeechRequest):
         raise HTTPException(status_code=500, detail="Processing unavailable")
 
 @router.get("/speech/download", summary="Download generated audio")
-async def download_speech(audio_path: str):
-    p = Path(audio_path)
-    if not p.exists():
+async def download_speech(audio_path: str, identity: SessionIdentity = Depends(dashboard_identity)):
+    p = Path(audio_path).resolve()
+    if p.parent != speech_directory(identity) or p.suffix != ".aiff" or not p.is_file():
         raise HTTPException(status_code=404, detail="Audio file not found")
     return FileResponse(p, media_type="audio/aiff", filename=p.name)

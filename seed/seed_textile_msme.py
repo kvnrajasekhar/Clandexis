@@ -18,9 +18,9 @@ from models.firestore_schema import (
 )
 
 
-def seed_demo_data(dry_run: bool = False):
+def seed_demo_data(dry_run: bool = False, *, merchant_id="+919876543210", shirt_stock=300, ramesh_opening=2500, db=None):
     merchant = Merchant(
-        merchant_id="+919876543210",
+        merchant_id=merchant_id,
         business_name="Sri Balaji Textiles",
         owner_name="Rajesh Kumar",
         preferred_lang="hi",
@@ -35,7 +35,7 @@ def seed_demo_data(dry_run: bool = False):
             display_name="Ramesh Textiles",
             aliases=["Ramesh", "Ramesh Bhai", "Ramesh Garments"],
             phone="+919811122233",
-            current_udhaar_balance=2500.0,
+            current_udhaar_balance=ramesh_opening,
             credit_limit=50000.0,
             last_txn_at=datetime.now(timezone.utc),
         ),
@@ -56,7 +56,7 @@ def seed_demo_data(dry_run: bool = False):
             item_name="Cotton Shirt (L)",
             aliases=["cotton shirt", "sooti shirt", "shirt", "cotton shirts"],
             unit="pieces",
-            current_stock=300.0,
+            current_stock=shirt_stock,
             default_unit_price=200.0,
             reorder_level=50.0,
             updated_at=datetime.now(timezone.utc),
@@ -80,14 +80,14 @@ def seed_demo_data(dry_run: bool = False):
     print(f"Parties ({len(parties)}): {[p.display_name for p in parties]}")
     print(f"Inventory ({len(inventory)}): {[f'{i.item_name}: {i.current_stock} {i.unit} @ ₹{i.default_unit_price}' for i in inventory]}")
 
-    if dry_run or not settings.GOOGLE_APPLICATION_CREDENTIALS:
+    if dry_run or (db is None and not settings.GOOGLE_APPLICATION_CREDENTIALS):
         print("\n[INFO] Running in local simulation mode (Dry Run).")
         print("To seed live Firestore, set GOOGLE_APPLICATION_CREDENTIALS in .env or run inside Cloud Run.")
         return
 
     try:
         from google.cloud import firestore
-        db = firestore.Client(project=settings.GCP_PROJECT_ID)
+        db = db or firestore.Client(project=settings.GCP_PROJECT_ID)
         
         # 1. Seed Merchant
         m_ref = db.collection("merchants").document(merchant.merchant_id)
@@ -103,7 +103,7 @@ def seed_demo_data(dry_run: bool = False):
 
         print("\n✅ Successfully seeded live Firestore database!")
     except Exception as e:
-        print(f"\n[WARNING] Could not connect to live Firestore: {e}")
+        raise RuntimeError("Firestore seed failed") from e
 
 
 if __name__ == "__main__":

@@ -185,3 +185,30 @@ def test_both_application_entrypoints_use_same_authenticated_bridge(app_client, 
         assert response.json()["posting_status"] == "COMMITTED"
         assert response.json()["invoice"]["status"] == "GENERATED"
     assert count(db, mid, "transactions") == 1
+
+
+def test_dashboard_downloads_committed_invoice_and_rejects_foreign_access(app_client, mid):
+    client, _, root = app_client
+    sign_in(client)
+    row = get_confirmation_service().stage(AuthenticatedMerchant(mid), "dashboard-sale", 0, sale())
+    from config import settings
+    from unittest.mock import patch
+    with patch.object(settings, "INVOICE_LOCAL_ROOT", str(root)):
+        posted = client.post("/api/v1/dashboard/candidates/confirm", json={"candidate_id":row.candidate_id})
+        assert posted.status_code == 200
+        url = "/api/v1/dashboard/transactions/" + posted.json()["transaction_id"] + "/invoice"
+        download = client.get(url)
+        assert download.status_code == 200 and download.content.startswith(b"%PDF-")
+        assert client.get(url, params={"merchant_id":"other"}).status_code == 403
+        client.cookies.clear()
+        assert client.get(url).status_code == 401
+
+
+def test_dashboard_review_revalidates_without_posting(app_client, db, mid):
+    client, _, _ = app_client
+    sign_in(client)
+    row = get_confirmation_service().stage(AuthenticatedMerchant(mid), "review", 0, unstated_sale())
+    url = "/api/v1/dashboard/candidates/" + row.candidate_id + "/review"
+    response = client.post(url, json={"candidate":sale().model_dump(mode="json"), "note":"Checked payment against bill"})
+    assert response.status_code == 200 and response.json()["review_resolved"]
+    assert count(db, mid, "transactions") == 0
