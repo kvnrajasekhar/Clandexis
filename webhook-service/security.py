@@ -17,15 +17,15 @@ def verify_meta_signature(payload_bytes: bytes, signature_header: Optional[str],
     Format: 'sha256=<hex_digest>'
     """
     if not app_secret:
-        logger.warning("META_APP_SECRET is not configured; skipping signature validation (dev mode only).")
-        return True
+        logger.error("META_APP_SECRET is not configured; rejecting webhook.")
+        return False
 
     if not signature_header:
         logger.error("Missing X-Hub-Signature-256 header in incoming Meta webhook.")
         return False
 
     if not signature_header.startswith("sha256="):
-        logger.error(f"Malformed signature header format: {signature_header}")
+        logger.error("Malformed signature header format")
         return False
 
     expected_signature = signature_header.split("sha256=")[-1]

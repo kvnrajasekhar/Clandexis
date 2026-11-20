@@ -1,20 +1,15 @@
-"""
-Agent Orchestrator Service:
-Bridges Inbound Webhook messages with Multimodal Gemini Extractor and Stage 4 Business Validator.
-Maps candidate transactions into Clandexis Canonical and Firestore entity schemas.
-"""
-
+"""Route replies before extraction; stage persisted candidates before approval."""
 import logging
-from typing import Optional, Tuple
-from app.pipeline import PipelineService
-from app.schemas.transaction import TransactionCandidate, ProcessingResult
-from models.canonical import InboundMessage, OutboundMessage, CanonicalButton
-from models.firestore_schema import TransactionIntent, TransactionStatus
+from app.schemas.transaction import ProcessingResult
+from app.services.confirmation import (
+    AuthenticatedMerchant, ConfirmationError, PostingResult, button_id,
+    get_confirmation_service,
+)
+from models.canonical import InboundMessage, OutboundMessage, CanonicalButton, MessageType
+from models.firestore_schema import TransactionIntent
 
 logger = logging.getLogger("agent-orchestrator")
-
-# Initialize multimodal pipeline
-pipeline = PipelineService()
+pipeline = None  # Lazy: confirmation callbacks must never initialize the extractor.
 
 INTENT_MAPPING = {
     "sale": TransactionIntent.SALE_INVOICE,
@@ -27,85 +22,73 @@ INTENT_MAPPING = {
     "unknown": TransactionIntent.UNKNOWN,
 }
 
-def orchestrate_inbound_message(message: InboundMessage) -> Tuple[ProcessingResult, OutboundMessage]:
+
+def posting_outbound(phone: str, result: PostingResult) -> OutboundMessage:
+    balances = ", ".join(f"{sku}: {quantity}" for sku, quantity in result.inventory_balance.items())
+    return OutboundMessage(recipient_phone=phone, text_content=(
+        f"Posting status: {result.posting_status}\nTransaction: {result.transaction_id}\n"
+        f"Amount paid: {result.amount_paid}\nCredit outstanding: {result.credit_outstanding}\n"
+        f"Inventory balance: {balances or 'No inventory movement'}"))
+
+
+def orchestrate_inbound_message(message: InboundMessage):
+    """Canonical input must come from the authenticated, merchant-resolved adapter.
+
+    Result is ProcessingResult for extraction, PostingResult for commit, None for
+    cancellation/errors. Transport dispatch occurs only after this function returns.
     """
-    Process inbound message from Meta WhatsApp:
-    1. Extract multimodal candidate via Gemini 3.5/3.8 Flash.
-    2. Run Stage 4 Business Validation.
-    3. Generate appropriate OutboundMessage (Confirmation / Clarification Button / Error).
-    """
-    merchant_id = message.tenant_id
-    sender_phone = message.sender_phone
-    
-    # 1. Execute Pipeline
+    global pipeline
+    merchant = AuthenticatedMerchant(message.tenant_id)
+    try:
+        service = get_confirmation_service()
+        reply = service.parse_reply(merchant, message)
+        if reply:
+            candidate_id, action = reply
+            result = service.handle_confirmation(merchant, candidate_id, action, message.message_id)
+            if isinstance(result, PostingResult):
+                return result, posting_outbound(message.sender_phone, result)
+            return None, OutboundMessage(recipient_phone=message.sender_phone,
+                                         text_content=f"Posting status: {result}. Nothing posted.")
+    except ConfirmationError as exc:
+        return None, OutboundMessage(recipient_phone=message.sender_phone, text_content=str(exc))
+
+    if pipeline is None:
+        from app.pipeline import PipelineService
+        pipeline = PipelineService()
     result = pipeline.process_and_interpret(
-        merchant_id=merchant_id,
-        message_id=message.message_id,
-        raw_text=message.text_content,
-        media_path=message.media_url,  # Direct path if downloaded locally
-    )
-    
-    tx: TransactionCandidate = result.extraction.transactions[0] if result.extraction.transactions else None
-    
-    if not tx:
-        outbound = OutboundMessage(
-            recipient_phone=sender_phone,
-            text_content="⚠️ Could not process your request. Please try again with clear voice or text."
-        )
-        return result, outbound
-
-    # 2. Check for Duplicate
+        merchant_id=message.tenant_id, message_id=message.message_id,
+        raw_text=message.text_content, media_path=message.media_url)
     if result.input_metadata.is_duplicate:
-        outbound = OutboundMessage(
-            recipient_phone=sender_phone,
-            text_content="ℹ️ Message already received and processed. Duplicate ignored."
-        )
-        return result, outbound
-
-    # 3. Formulate WhatsApp Response based on Validation Status
+        return result, OutboundMessage(recipient_phone=message.sender_phone,
+                                       text_content="Message already received. Duplicate ignored.")
+    transactions = result.extraction.transactions
+    if not transactions:
+        return result, OutboundMessage(recipient_phone=message.sender_phone,
+                                       text_content="Could not process your request. Please send clear details.")
+    # Do not silently discard additional extracted transactions or approve a bundle
+    # using one button. Ask for individual submissions until transport supports a batch.
+    if len(transactions) != 1:
+        return result, OutboundMessage(recipient_phone=message.sender_phone,
+                                       text_content="Please send one transaction at a time. Nothing posted.")
+    tx = transactions[0]
     if tx.validation_status == "REJECTED":
-        warning_text = "\n".join(f"• {w}" for w in tx.validation_warnings)
-        outbound = OutboundMessage(
-            recipient_phone=sender_phone,
-            text_content=f"❌ *Transaction Rejected*\n{warning_text}\n\nPlease check the amounts and send again."
-        )
-    elif tx.needs_clarification or tx.validation_status == "NEEDS_REVIEW":
-        q_text = tx.clarification_question or "Please confirm the transaction details before we record it."
-        warning_str = f"\n_Note: {tx.validation_warnings[0]}_" if tx.validation_warnings else ""
-        
-        # Dispatch 1-Tap Quick-Reply Confirmation buttons
-        outbound = OutboundMessage(
-            recipient_phone=sender_phone,
-            interactive_header="⚠️ Clarification Required",
-            interactive_body=f"{q_text}{warning_str}\n\n*Party:* {tx.buyer_name or 'N/A'}\n*Total:* ₹{tx.total_amount or 0:.2f}",
-            interactive_footer="Clandexis Invisible ERP",
-            buttons=[
-                CanonicalButton(id=f"CONFIRM_{message.message_id}", title="✅ Confirm (हाँ)"),
-                CanonicalButton(id=f"CANCEL_{message.message_id}", title="❌ Cancel (रद्द)"),
-            ]
-        )
-    else:
-        # ACCEPTED: Clean validated transaction candidate ready for ledger commit
-        items_summary = "\n".join(
-            f"• {i.quantity or 1} {i.item_name} @ ₹{i.unit_price or 0:.2f} = ₹{i.line_total or 0:.2f}"
-            for i in tx.items
-        ) if tx.items else "• General Entry"
-        
-        paid_info = f"₹{tx.amount_paid:.2f}" if tx.amount_paid is not None else "₹0.00"
-        credit_info = f"₹{tx.credit_amount:.2f}" if tx.credit_amount is not None else "₹0.00"
-
-        outbound = OutboundMessage(
-            recipient_phone=sender_phone,
-            text_content=(
-                f"✅ *Recorded {tx.transaction_type.capitalize()}*\n"
-                f"*Party:* {tx.buyer_name or 'Direct Customer'}\n"
-                f"{items_summary}\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"*Total:* ₹{tx.total_amount or 0:.2f}\n"
-                f"*Paid:* {paid_info}\n"
-                f"*Balance Due (Udhaar):* {credit_info}\n\n"
-                f"_Entry posted to ledger successfully._"
-            )
-        )
-        
-    return result, outbound
+        return result, OutboundMessage(recipient_phone=message.sender_phone,
+            text_content="❌ *Transaction Rejected*\n" + "\n".join(tx.validation_warnings))
+    try:
+        row = service.stage(merchant, message.message_id, 0, tx)
+        review = (row.candidate.validation_status == "NEEDS_REVIEW"
+                  or row.candidate.needs_clarification or row.candidate.requires_review)
+        body = (row.candidate.clarification_question or "Review these details before confirming.")
+        body += f"\nParty: {row.candidate.buyer_name or 'N/A'}\n"
+        body += f"Total: {row.candidate.currency} {row.candidate.total_amount}\n"
+        body += f"Candidate: {row.candidate_id}\nNothing posted yet."
+        if review:
+            body += "\nCorrection or explicit review and revalidation is required before Confirm can post."
+        return result, OutboundMessage(
+            recipient_phone=message.sender_phone, message_type=MessageType.INTERACTIVE_BUTTON,
+            interactive_header="Clarification Required" if review else "Confirm Transaction",
+            interactive_body=body, interactive_footer="Clandexis",
+            buttons=[CanonicalButton(id=button_id(row.candidate_id, "confirm"), title="✅ Confirm (हाँ)"),
+                     CanonicalButton(id=button_id(row.candidate_id, "cancel"), title="❌ Cancel (रद्द)")])
+    except ConfirmationError as exc:
+        return result, OutboundMessage(recipient_phone=message.sender_phone, text_content=str(exc))

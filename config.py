@@ -15,9 +15,9 @@ from pydantic import BaseModel, Field
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
 if ENV_PATH.exists():
-    load_dotenv(dotenv_path=ENV_PATH, override=True)
+    load_dotenv(dotenv_path=ENV_PATH, override=False)
 else:
-    load_dotenv(override=True)
+    load_dotenv(override=False)
 
 
 class Settings(BaseModel):
@@ -84,6 +84,17 @@ class Settings(BaseModel):
     HIGH_CREDIT_THRESHOLD: float = Field(
         default_factory=lambda: float(os.getenv("HIGH_CREDIT_THRESHOLD", "5000.00"))
     )
+
+    TRUSTED_ORIGINS: list[str] = Field(default_factory=lambda: [
+        value.strip() for value in os.getenv("TRUSTED_ORIGINS", "").split(",")
+        if value.strip() and value.strip() != "*"
+    ])
+    DASHBOARD_SESSION_SECRET: str = Field(default_factory=lambda: os.getenv("DASHBOARD_SESSION_SECRET", ""))
+    DASHBOARD_DEMO_USERNAME: str = Field(default_factory=lambda: os.getenv("DASHBOARD_DEMO_USERNAME", "demo"))
+    DASHBOARD_DEMO_PASSWORD: str = Field(default_factory=lambda: os.getenv("DASHBOARD_DEMO_PASSWORD", ""))
+    DASHBOARD_DEMO_MERCHANT_ID: str = Field(default_factory=lambda: os.getenv("DASHBOARD_DEMO_MERCHANT_ID", ""))
+    INTERNAL_SEND_TOKEN: str = Field(default_factory=lambda: os.getenv("INTERNAL_SEND_TOKEN", ""))
+    INVOICE_LOCAL_ROOT: Optional[str] = Field(default_factory=lambda: os.getenv("INVOICE_LOCAL_ROOT"))
 
     @property
     def is_production(self) -> bool:

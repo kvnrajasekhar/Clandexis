@@ -6,3 +6,6 @@ api_router = APIRouter()
 api_router.include_router(v1_router, prefix="", tags=["Transaction Pipeline & Speech"])
 api_router.include_router(dashboard_router, prefix="", tags=["Judge & Merchant Dashboard"])
 
+
+from app.core.security import router as auth_router
+api_router.include_router(auth_router)

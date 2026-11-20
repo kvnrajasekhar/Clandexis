@@ -13,14 +13,8 @@ def create_app() -> FastAPI:
         redoc_url=f"{settings.API_V1_STR}/redoc",
     )
 
-    # Enable CORS for product/web/app integration
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    from app.core.security import install_security
+    install_security(app)
 
     # Health check
     @app.get("/health", tags=["Health"])

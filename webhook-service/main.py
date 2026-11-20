@@ -9,7 +9,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi import BackgroundTasks, FastAPI, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 
@@ -46,13 +46,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+from app.core.security import install_security, require_service
+install_security(app)
 
 # Mount all /api/v1 endpoints including dashboard & multimodal extraction
 app.include_router(api_router, prefix="/api/v1")
@@ -101,7 +96,7 @@ async def verify_meta_webhook(
         logger.info("Meta webhook verified successfully.")
         return PlainTextResponse(content=hub_challenge or "", status_code=200)
 
-    logger.warning(f"Meta webhook verification failed. Token received: {hub_verify_token}")
+    logger.warning("Meta webhook verification failed")
     raise HTTPException(status_code=403, detail="Verification token mismatch")
 
 
@@ -153,11 +148,24 @@ async def process_inbound_message(message: InboundMessage):
         result, outbound = orchestrate_inbound_message(message)
         logger.info("Orchestration completed for %s (%s)", message.message_id, type(result).__name__)
         
-        # Dispatch WhatsApp reply back to user
+        # Generate only after a successful ledger result; all side effects are
+        # outside Firestore callbacks. Invoice errors never undo the committed sale.
+        from app.services.confirmation import AuthenticatedMerchant, PostingResult
+        from app.services.posting_flow import generate_posting_document
+        from models.canonical import MessageType
+        document = None
+        if isinstance(result, PostingResult):
+            document = generate_posting_document(AuthenticatedMerchant(message.tenant_id), result)
+            if document["status"] != "NOT_APPLICABLE":
+                outbound.text_content += f"\nInvoice status: {document['status']}"
         if meta_service:
             await meta_service.dispatch_outbound(outbound)
+            if document and document.get("document_url"):
+                await meta_service.dispatch_outbound(OutboundMessage(
+                    recipient_phone=message.sender_phone, message_type=MessageType.DOCUMENT,
+                    document_url=document["document_url"], document_filename=document["filename"]))
     except Exception as e:
-        logger.error(f"Error in process_inbound_message: {e}", exc_info=True)
+        logger.error("Inbound processing failed (%s)", type(e).__name__)
 
 
 # ==============================================================================
@@ -165,7 +173,7 @@ async def process_inbound_message(message: InboundMessage):
 # ==============================================================================
 
 @app.post("/api/v1/send")
-async def send_outbound_message(outbound: OutboundMessage):
+async def send_outbound_message(outbound: OutboundMessage, authorized=Depends(require_service)):
     """
     Internal API for microservices (agent-orchestrator, pdf-service) to dispatch
     messages, 1-tap confirmation buttons, PDF invoices, and audio readbacks to WhatsApp.

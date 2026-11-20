@@ -12,7 +12,7 @@
 
 By deploying multimodal Google AI agents directly over WhatsApp, Clandexis converts messy vernacular voice notes (Hindi, Hinglish, Telugu), handwritten receipts, and quick text messages into:
 1. **Atomic ledger entries** (instant stock balance adjustments and udhaar tracking).
-2. **GST / MSME compliant digital PDF invoices** delivered directly back to WhatsApp.
+2. **Basic PDF invoices from committed sales**, exposed through a document-generation interface for the WhatsApp sender (no GST compliance certification).
 3. **Cryptographically signed, bank-ready credit reports** signed via Google Cloud KMS.
 
 ---
@@ -86,7 +86,7 @@ Incoming webhooks from Meta are verified using HMAC-SHA256 (`X-Hub-Signature-256
 ### 2. Outbound Message Dispatching
 - **Text Messages:** Instant confirmations with WhatsApp markdown formatting.
 - **Interactive Quick-Reply Buttons:** Dispatches 1-tap buttons (e.g. `[✅ Confirm]`, `[❌ Cancel]`) whenever high credit or low confidence is detected.
-- **Document Messages:** Delivers generated GST/MSME PDF invoices and KMS-attested credit reports.
+- **Document Messages:** Supports PDF delivery. The implemented invoice generator produces basic invoices from committed sales; GST certification and KMS attestation are not implemented by this service.
 - **Audio Voice Readbacks:** Sends synthesized vernacular audio via Gemini 3.8 Flash TTS.
 
 ---
@@ -136,3 +136,7 @@ uvicorn webhook_service.main:app --host 0.0.0.0 --port 8080 --reload
 ```bash
 python3 seed/seed_textile_msme.py --dry-run
 ```
+
+## Confirmation and PDF integration
+
+See [CONFIRMATION_PDF_INTERFACE.md](docs/CONFIRMATION_PDF_INTERFACE.md) for application APIs, Claude ledger dependencies, the pending atomic review extension, sender integration, retry guarantees and tests. Install `requirements-dev.txt` to run PDF inspection tests. Confirmations use persisted candidates and committed database results; extraction alone never means a sale was posted.

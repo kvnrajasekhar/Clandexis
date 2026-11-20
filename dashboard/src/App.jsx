@@ -22,9 +22,33 @@ import {
   SlidersHorizontal
 } from 'lucide-react';
 
-const MERCHANT_ID = "+919876543210";
+
 
 export default function App() {
+  const [session, setSession] = useState(null);
+  const [loginError, setLoginError] = useState('');
+  const MERCHANT_ID = session?.merchant_id || '';
+  const apiFetch = (url, options = {}) => fetch(url, {
+    ...options, credentials: 'same-origin',
+    headers: { ...options.headers, 'X-CSRF-Token': session?.csrf_token || '' },
+  }).then(response => {
+    if (response.status === 401) setSession(null);
+    return response;
+  });
+  useEffect(() => {
+    fetch('/api/v1/auth/session', { credentials: 'same-origin' })
+      .then(response => response.ok ? response.json() : null).then(setSession);
+  }, []);
+  const login = async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const response = await fetch('/api/v1/auth/login', {
+      method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: form.get('username'), password: form.get('password') }),
+    });
+    if (response.ok) { setSession(await response.json()); setLoginError(''); }
+    else setLoginError('Sign-in failed. Check your account credentials.');
+  };
   const [activeTab, setActiveTab] = useState('overview'); // 'overview', 'candidates', 'transactions', 'inventory', 'demo'
   const [summary, setSummary] = useState(null);
   const [inventory, setInventory] = useState([]);
@@ -42,13 +66,14 @@ export default function App() {
 
   const fetchData = async () => {
     try {
+      if (!session) return;
       setRefreshing(true);
       const [sumRes, invRes, partRes, txnRes, candRes] = await Promise.all([
-        fetch(`/api/v1/dashboard/summary?merchant_id=${encodeURIComponent(MERCHANT_ID)}`),
-        fetch(`/api/v1/dashboard/inventory?merchant_id=${encodeURIComponent(MERCHANT_ID)}`),
-        fetch(`/api/v1/dashboard/parties?merchant_id=${encodeURIComponent(MERCHANT_ID)}`),
-        fetch(`/api/v1/dashboard/transactions?merchant_id=${encodeURIComponent(MERCHANT_ID)}`),
-        fetch(`/api/v1/dashboard/candidates?merchant_id=${encodeURIComponent(MERCHANT_ID)}`),
+        apiFetch(`/api/v1/dashboard/summary?merchant_id=${encodeURIComponent(MERCHANT_ID)}`),
+        apiFetch(`/api/v1/dashboard/inventory?merchant_id=${encodeURIComponent(MERCHANT_ID)}`),
+        apiFetch(`/api/v1/dashboard/parties?merchant_id=${encodeURIComponent(MERCHANT_ID)}`),
+        apiFetch(`/api/v1/dashboard/transactions?merchant_id=${encodeURIComponent(MERCHANT_ID)}`),
+        apiFetch(`/api/v1/dashboard/candidates?merchant_id=${encodeURIComponent(MERCHANT_ID)}`),
       ]);
 
       if (sumRes.ok) setSummary(await sumRes.json());
@@ -65,14 +90,15 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (!session) return;
     fetchData();
     const interval = setInterval(fetchData, 8000);
     return () => clearInterval(interval);
-  }, []);
+  }, [session]);
 
   const handleConfirmCandidate = async (candidateId) => {
     try {
-      const res = await fetch('/api/v1/dashboard/candidates/confirm', {
+      const res = await apiFetch('/api/v1/dashboard/candidates/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -95,7 +121,7 @@ export default function App() {
 
   const handleCancelCandidate = async (candidateId) => {
     try {
-      const res = await fetch('/api/v1/dashboard/candidates/cancel', {
+      const res = await apiFetch('/api/v1/dashboard/candidates/cancel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -118,7 +144,7 @@ export default function App() {
     setDemoLoading(true);
     setDemoResult(null);
     try {
-      const res = await fetch('/api/v1/extract/text', {
+      const res = await apiFetch('/api/v1/extract/text', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -137,6 +163,20 @@ export default function App() {
       setDemoLoading(false);
     }
   };
+
+  if (!session) return (
+    <main className="min-h-screen bg-slate-950 text-slate-100 grid place-items-center">
+      <form onSubmit={login} className="w-80 space-y-4 p-6 bg-slate-900 rounded-xl">
+        <h1 className="text-xl font-semibold">Clandexis sign in</h1>
+        <input name="username" autoComplete="username" required placeholder="Username"
+          className="w-full p-3 bg-slate-800 rounded" />
+        <input name="password" type="password" autoComplete="current-password" required placeholder="Password"
+          className="w-full p-3 bg-slate-800 rounded" />
+        <button className="w-full p-3 bg-emerald-600 rounded">Sign in</button>
+        {loginError && <p role="alert">{loginError}</p>}
+      </form>
+    </main>
+  );
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
