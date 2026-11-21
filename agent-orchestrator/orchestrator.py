@@ -67,69 +67,46 @@ def deliver_invoice_outbound(
     recipient_phone: str,
     txn_id: str,
 ) -> OutboundMessage:
-    """Generate or retrieve the commercial PDF invoice and return outbound message."""
+    """Generate and return the commercial PDF invoice/receipt directly into WhatsApp chat."""
     try:
-        from app.services.posting_flow import generate_posting_document
-        res = PostingResult(
-            candidate_id="",
-            transaction_id=txn_id,
-            posting_status="COMMITTED",
-            inventory_balance={},
-            amount_paid=Decimal(0),
-            credit_outstanding=Decimal(0),
-            merchant_id=merchant.merchant_id,
+        from pdf_service import generate_transaction_pdf
+        pdf_bytes, filename = generate_transaction_pdf(merchant.merchant_id, txn_id)
+        return OutboundMessage(
+            recipient_phone=recipient_phone,
+            message_type=MessageType.DOCUMENT,
+            document_bytes=pdf_bytes,
+            document_filename=filename,
+            text_content=f"📄 Official transaction record for #{txn_id[:8]}",
         )
-        doc_outcome = generate_posting_document(merchant, res)
-        doc_url = doc_outcome.get("document_url")
-        filename = doc_outcome.get("filename", f"invoice-{txn_id[:8]}.pdf")
-
-        inv = None
-        from app.services.persistence import ledger
-        if hasattr(ledger, "get_db"):
-            try:
-                with ledger.get_db().transaction(merchant.merchant_id) as conn:
-                    inv = conn.execute(
-                        "SELECT * FROM invoices WHERE merchant_id=%s AND transaction_id=%s",
-                        (merchant.merchant_id, txn_id),
-                    ).fetchone()
-            except Exception:
-                pass
-
-        lines = [f"📄 *Invoice for Transaction #{txn_id[:8]}*"]
-        if inv:
-            inv_num = inv.get("invoice_number") or txn_id[:8]
-            buyer = (inv.get("buyer_snapshot") or {}).get("display_name") or "Customer"
-            tot = inv.get("total_amount") or 0
-            paid = inv.get("amount_paid") or 0
-            due = inv.get("amount_due") or 0
-            lines.append(f"• Invoice No: {inv_num}")
-            lines.append(f"• Customer: {buyer}")
-            lines.append(f"• Total: ₹{tot:,.2f}")
-            lines.append(f"• Paid: ₹{paid:,.2f}")
-            if due > 0:
-                lines.append(f"• Due / Udhaar: ₹{due:,.2f}")
-        if doc_url:
-            lines.append(f"\n📥 *Download PDF:* {doc_url}")
-        else:
-            lines.append(f"\n✅ PDF invoice generated and stored in ledger records.")
-
-        text_body = "\n".join(lines)
-        if doc_url:
-            return OutboundMessage(
-                recipient_phone=recipient_phone,
-                message_type=MessageType.DOCUMENT,
-                document_url=doc_url,
-                document_filename=filename,
-                text_content=text_body,
+    except Exception as e:
+        # Fallback to posting document if available
+        try:
+            from app.services.posting_flow import generate_posting_document
+            res = PostingResult(
+                candidate_id="",
+                transaction_id=txn_id,
+                posting_status="COMMITTED",
+                inventory_balance={},
+                amount_paid=Decimal(0),
+                credit_outstanding=Decimal(0),
+                merchant_id=merchant.merchant_id,
             )
+            doc_outcome = generate_posting_document(merchant, res)
+            doc_url = doc_outcome.get("document_url")
+            filename = doc_outcome.get("filename", f"invoice-{txn_id[:8]}.pdf")
+            if doc_url:
+                return OutboundMessage(
+                    recipient_phone=recipient_phone,
+                    message_type=MessageType.DOCUMENT,
+                    document_url=doc_url,
+                    document_filename=filename,
+                    text_content=f"📄 Invoice #{txn_id[:8]}",
+                )
+        except Exception:
+            pass
         return OutboundMessage(
             recipient_phone=recipient_phone,
-            text_content=text_body,
-        )
-    except Exception:
-        return OutboundMessage(
-            recipient_phone=recipient_phone,
-            text_content=f"📄 Invoice #{txn_id[:8]} is recorded in your ledger. View it anytime from your dashboard.",
+            text_content=f"📄 Transaction #{txn_id[:8]} is recorded in your ledger.",
         )
 
 
@@ -137,6 +114,8 @@ def posting_outbound(phone: str, result: PostingResult, language: str = "en",
                      script: str = "Latin") -> OutboundMessage:
     labels = copy_for(language, script)
     body = posting_summary(result, language, script)
+    is_stock_only = (result.amount_paid == 0 and result.credit_outstanding == 0 and bool(result.inventory_balance))
+    doc_button_title = "📄 Stock Receipt" if is_stock_only else "📄 PDF Invoice"
     return OutboundMessage(
         recipient_phone=phone,
         message_type=MessageType.INTERACTIVE_BUTTON,
@@ -146,7 +125,7 @@ def posting_outbound(phone: str, result: PostingResult, language: str = "en",
         buttons=[
             CanonicalButton(
                 id=f"view_pdf_{result.transaction_id}",
-                title="📄 PDF Invoice",
+                title=doc_button_title,
             ),
             CanonicalButton(
                 id=f"view_ledger_{result.transaction_id}",

@@ -367,14 +367,25 @@ class MetaWhatsAppService:
                 phone_number_id=target_pid,
             )
             
-        elif message.message_type == MessageType.DOCUMENT and message.document_url:
-            return await self.send_document_message(
-                to=to_phone,
-                document_url=message.document_url,
-                filename=message.document_filename or "invoice.pdf",
-                caption=message.text_content,
-                phone_number_id=target_pid,
-            )
+        elif message.message_type == MessageType.DOCUMENT:
+            media_id = getattr(message, "media_id", None)
+            doc_bytes = getattr(message, "document_bytes", None)
+            if not media_id and doc_bytes:
+                media_id = await self.upload_media_bytes(
+                    doc_bytes,
+                    filename=message.document_filename or "document.pdf",
+                    mime_type="application/pdf",
+                    phone_number_id=target_pid,
+                )
+            if media_id or message.document_url:
+                return await self.send_document_message(
+                    to=to_phone,
+                    document_url=message.document_url,
+                    media_id=media_id,
+                    filename=message.document_filename or "document.pdf",
+                    caption=message.text_content,
+                    phone_number_id=target_pid,
+                )
             
         elif message.message_type == MessageType.AUDIO and message.audio_url:
             return await self.send_audio_message(
@@ -495,27 +506,71 @@ class MetaWhatsAppService:
         )
         return await self._post_message(payload, phone_number_id=phone_number_id)
 
+    async def upload_media_bytes(
+        self,
+        file_bytes: bytes,
+        filename: str = "document.pdf",
+        mime_type: str = "application/pdf",
+        phone_number_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Uploads raw file bytes directly to Meta WhatsApp Cloud API media endpoint.
+        Returns the media_id for sending as a native WhatsApp attachment.
+        """
+        pid = phone_number_id or self.phone_number_id or "1461651120366905"
+        endpoint = f"{self.graph_base_url}/{self.api_version}/{pid}/media"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+        }
+        files = {
+            "file": (filename, file_bytes, mime_type),
+        }
+        data = {
+            "messaging_product": "whatsapp",
+            "type": mime_type,
+        }
+        try:
+            resp = await self.http_client.post(
+                endpoint,
+                headers=headers,
+                data=data,
+                files=files,
+                timeout=30.0,
+            )
+            if resp.status_code in (200, 201):
+                res_data = resp.json()
+                media_id = res_data.get("id")
+                logger.info("Uploaded %s bytes to Meta media storage: media_id=%s", len(file_bytes), media_id)
+                return media_id
+            logger.error("Meta media upload failed (%s): %s", resp.status_code, resp.text)
+        except Exception as e:
+            logger.error("Exception uploading media to Meta: %s", e, exc_info=True)
+        return None
+
     async def send_document_message(
         self,
         to: str,
-        document_url: str,
+        document_url: Optional[str] = None,
+        media_id: Optional[str] = None,
         filename: str = "invoice.pdf",
         caption: Optional[str] = None,
         phone_number_id: Optional[str] = None,
     ) -> Optional[MetaSendResponse]:
         """
-        Sends PDF invoices or cryptographically attested credit reports.
+        Sends PDF invoices or receipts natively via Meta Cloud API using either direct media_id or link.
         """
+        doc_payload = MetaMediaPayload(
+            id=media_id if media_id else None,
+            link=document_url if (not media_id and document_url) else None,
+            filename=filename,
+            caption=caption,
+        )
         payload = MetaSendMessageRequest(
             messaging_product="whatsapp",
             recipient_type="individual",
             to=to.replace("+", ""),
             type=MetaMessageType.DOCUMENT,
-            document=MetaMediaPayload(
-                link=document_url,
-                filename=filename,
-                caption=caption,
-            ),
+            document=doc_payload,
         )
         return await self._post_message(payload, phone_number_id=phone_number_id)
 

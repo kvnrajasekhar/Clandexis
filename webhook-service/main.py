@@ -217,18 +217,42 @@ async def process_inbound_message(message: InboundMessage):
         from app.services.posting_flow import generate_posting_document
         document = None
         if isinstance(result, PostingResult):
-            document = generate_posting_document(AuthenticatedMerchant(message.tenant_id), result)
-            if document["status"] != "NOT_APPLICABLE":
-                outbound.text_content += f"\nInvoice status: {document['status']}"
+            try:
+                from pdf_service import generate_transaction_pdf
+                pdf_bytes, filename = generate_transaction_pdf(message.tenant_id, result.transaction_id)
+                document = {
+                    "status": "GENERATED",
+                    "filename": filename,
+                    "document_bytes": pdf_bytes,
+                }
+            except Exception:
+                try:
+                    document = generate_posting_document(AuthenticatedMerchant(message.tenant_id), result)
+                except Exception:
+                    document = None
+
         if meta_service:
             if message.recipient_phone_id:
                 outbound.sender_phone_id = message.recipient_phone_id
             await meta_service.dispatch_outbound(outbound, phone_number_id=message.recipient_phone_id)
-            if document and document.get("document_url"):
+            if document and document.get("document_bytes"):
                 await meta_service.dispatch_outbound(OutboundMessage(
-                    recipient_phone=message.sender_phone, message_type=MessageType.DOCUMENT,
-                    document_url=document["document_url"], document_filename=document["filename"],
-                    sender_phone_id=message.recipient_phone_id), phone_number_id=message.recipient_phone_id)
+                    recipient_phone=message.sender_phone,
+                    message_type=MessageType.DOCUMENT,
+                    document_bytes=document["document_bytes"],
+                    document_filename=document["filename"],
+                    text_content=f"📄 {document['filename']}",
+                    sender_phone_id=message.recipient_phone_id,
+                ), phone_number_id=message.recipient_phone_id)
+            elif document and document.get("document_url"):
+                await meta_service.dispatch_outbound(OutboundMessage(
+                    recipient_phone=message.sender_phone,
+                    message_type=MessageType.DOCUMENT,
+                    document_url=document["document_url"],
+                    document_filename=document["filename"],
+                    text_content=f"📄 {document['filename']}",
+                    sender_phone_id=message.recipient_phone_id,
+                ), phone_number_id=message.recipient_phone_id)
     except Exception as e:
         logger.error("Inbound processing failed (%s)", type(e).__name__)
 

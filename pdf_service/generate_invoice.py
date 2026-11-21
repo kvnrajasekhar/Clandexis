@@ -179,6 +179,139 @@ def render_invoice(sale: CommittedSale) -> bytes:
     return output.getvalue()
 
 
+def render_stock_intake_receipt(
+    merchant_name: str,
+    transaction_id: str,
+    business_date: str,
+    items: list,
+) -> bytes:
+    """Render an official Goods Receipt Note (GRN) / Stock Intake document."""
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="ReceiptCell", fontName="Helvetica", fontSize=9, leading=13, splitLongWords=True))
+    styles.add(ParagraphStyle(name="ReceiptRight", parent=styles["ReceiptCell"], alignment=TA_RIGHT))
+    def p(value, style="ReceiptCell"):
+        return Paragraph(escape(str(value)).replace("\n", "<br/>"), styles[style])
+
+    story = [
+        p("INVENTORY STOCK RECEIPT", "Title"),
+        p("Official Goods Receipt Note (GRN) — Committed to Inventory Ledger"),
+        Spacer(1, 16),
+        p(f"Record ID: {transaction_id}", "Heading2"),
+        p(f"Date: {business_date}"),
+        p(f"Merchant / Mill: {merchant_name}"),
+        Spacer(1, 14),
+    ]
+    rows = [[p(x) for x in ("Item / Material", "Quantity Added", "Unit")]]
+    for it in items:
+        rows.append([
+            p(it.get("item_description") or it.get("name") or "Stock Item"),
+            p(f"{it.get('quantity') or 0}", "ReceiptRight"),
+            p(it.get("unit") or "units"),
+        ])
+    table = Table(rows, colWidths=[280, 110, 109], repeatRows=1, splitInRow=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e5edf4")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.6, colors.HexColor("#8296aa")),
+        ("LINEBELOW", (0, 1), (-1, -1), 0.3, colors.HexColor("#dce3ea")),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    story.extend([table, Spacer(1, 20)])
+    output = BytesIO()
+    doc = SimpleDocTemplate(output, pagesize=A4, leftMargin=48, rightMargin=48,
+                            topMargin=42, bottomMargin=48, title="Stock Intake Receipt", author="Clandexis", invariant=1)
+    def footer(canvas, document):
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#52667a"))
+        canvas.drawString(48, 26, "Clandexis | Official Stock Ledger Intake Record")
+        canvas.drawRightString(A4[0] - 48, 26, f"Page {document.page}")
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    return output.getvalue()
+
+
+def generate_transaction_pdf(merchant_id: str, txn_id: str) -> tuple[bytes, str]:
+    """Universal PDF document generator for ANY committed transaction (sales or stock intake)."""
+    from app.services.persistence import ledger
+    if hasattr(ledger, "get_db"):
+        with ledger.get_db().transaction(merchant_id) as conn:
+            tx = conn.execute(
+                "SELECT t.*, p.display_name AS buyer_name, m.business_name AS merchant_name "
+                "FROM transactions t "
+                "LEFT JOIN parties p ON p.id = t.party_id "
+                "LEFT JOIN merchants m ON m.id = t.merchant_id "
+                "WHERE t.merchant_id=%s AND t.id=%s",
+                (merchant_id, txn_id),
+            ).fetchone()
+            if not tx:
+                raise ValueError(f"Transaction {txn_id} not found in database")
+
+            items = conn.execute(
+                "SELECT * FROM transaction_items WHERE transaction_id=%s",
+                (txn_id,),
+            ).fetchall()
+            items_list = [dict(it) for it in items]
+
+            intent = tx.get("intent") or "SALE_INVOICE"
+            m_name = tx.get("merchant_name") or "Clandexis Merchant"
+            b_date = str(tx.get("business_date") or date.today())
+
+            if intent in ("PRODUCTION_LOG", "STOCK_ADDED", "OPENING_BALANCE"):
+                pdf_bytes = render_stock_intake_receipt(
+                    merchant_name=m_name,
+                    transaction_id=str(txn_id),
+                    business_date=b_date,
+                    items=items_list,
+                )
+                return pdf_bytes, f"stock-intake-{str(txn_id)[:8]}.pdf"
+            else:
+                sale_items = []
+                for it in items_list:
+                    qty = Decimal(str(it.get("quantity") or 1))
+                    price = Decimal(str(it.get("unit_price") or 0))
+                    total = Decimal(str(it.get("line_total") or (qty * price)))
+                    sale_items.append(InvoiceItem(
+                        name=it.get("item_description") or "Item",
+                        quantity=qty,
+                        unit=it.get("unit") or "pieces",
+                        unit_price=price,
+                        discount=Decimal("0"),
+                        line_total=total,
+                    ))
+                if not sale_items:
+                    tot_amt = Decimal(str(tx.get("total_amount") or 0))
+                    sale_items.append(InvoiceItem(
+                        name="General Merchandise",
+                        quantity=Decimal("1"),
+                        unit="order",
+                        unit_price=tot_amt,
+                        discount=Decimal("0"),
+                        line_total=tot_amt,
+                    ))
+                subtot = sum((i.line_total for i in sale_items), Decimal(0))
+                sale = CommittedSale(
+                    merchant_id=str(merchant_id),
+                    transaction_id=str(txn_id),
+                    status="COMMITTED",
+                    intent="SALE_INVOICE",
+                    merchant_name=m_name,
+                    buyer_name=tx.get("buyer_name") or "Customer",
+                    invoice_number=str(txn_id)[:8].upper(),
+                    invoice_date=date.fromisoformat(b_date) if isinstance(b_date, str) and len(b_date) == 10 else date.today(),
+                    currency=tx.get("currency") or "INR",
+                    items=tuple(sale_items),
+                    subtotal=subtot,
+                    discount=Decimal(str(tx.get("discount_amount") or 0)),
+                    tax=Decimal(str(tx.get("tax_amount") or 0)),
+                    total=Decimal(str(tx.get("total_amount") or subtot)),
+                    paid=Decimal(str(tx.get("amount_paid") or 0)),
+                    due=Decimal(str(tx.get("credit_amount") or 0)),
+                )
+                pdf_bytes = render_invoice(sale)
+                return pdf_bytes, f"invoice-{str(txn_id)[:8]}.pdf"
+    raise ValueError("Database backend not configured for PDF generation")
+
+
 class InvoiceService:
     def __init__(self, repository: InvoiceRepository, artifacts: ArtifactStore):
         self.repository = repository

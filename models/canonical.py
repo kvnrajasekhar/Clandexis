@@ -101,6 +101,8 @@ class OutboundMessage(BaseModel):
     # Media attachments (PDF invoice, KMS report, TTS voice note)
     document_url: Optional[str] = None
     document_filename: Optional[str] = None
+    document_bytes: Optional[bytes] = None
+    media_id: Optional[str] = None
     audio_url: Optional[str] = None
     image_url: Optional[str] = None
     sender_phone_id: Optional[str] = Field(None, description="Meta phone number ID to send message from")
