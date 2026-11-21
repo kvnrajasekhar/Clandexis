@@ -96,6 +96,8 @@ class MetaWhatsAppService:
                 contact_map = {c.wa_id: (c.profile.name if c.profile else None) for c in value.contacts or []}
 
                 for msg in value.messages:
+                    if self._is_onboarding_action(msg):
+                        continue
                     sender_wa_id = msg.from_user
                     from app.services.whatsapp_identity import normalize_phone
                     try:
@@ -165,10 +167,15 @@ class MetaWhatsAppService:
 
         return unregistered
 
-    def parse_unregistered_inbound_messages(self, raw_data: Dict[str, Any]) -> List[InboundMessage]:
+    def parse_unregistered_inbound_messages(
+        self,
+        raw_data: Dict[str, Any],
+        *,
+        include_registered_onboarding_actions: bool = False,
+    ) -> List[InboundMessage]:
         """
-        Parses messages from senders who do not have an active/approved merchant account yet.
-        Enables interactive WhatsApp merchant onboarding without dropping messages.
+        Parses onboarding messages from unregistered senders, plus optional stale onboarding
+        actions from registered senders so they cannot reach transaction processing.
         """
         inbound_messages: List[InboundMessage] = []
         try:
@@ -199,13 +206,14 @@ class MetaWhatsAppService:
                     if not re.fullmatch(r"\+[1-9][0-9]{1,14}", sender_phone):
                         continue
                     tenant_id = resolve_sender(sender_phone)
-                    if tenant_id:
+                    onboarding_action = self._is_onboarding_action(msg)
+                    if tenant_id and not (include_registered_onboarding_actions and onboarding_action):
                         continue  # Already registered
 
                     sender_name = contact_map.get(sender_wa_id)
                     canonical_msg = self._normalize_message(
                         msg=msg,
-                        tenant_id=sender_phone,
+                        tenant_id=tenant_id or sender_phone,
                         sender_phone=sender_phone,
                         sender_name=sender_name,
                         recipient_phone_id=incoming_pid,
@@ -220,6 +228,26 @@ class MetaWhatsAppService:
                         inbound_messages.append(canonical_msg)
 
         return inbound_messages
+
+    @staticmethod
+    def _is_onboarding_action(msg: MetaMessage) -> bool:
+        if msg.type != MetaMessageType.INTERACTIVE or not msg.interactive:
+            return False
+        action_id = (
+            msg.interactive.button_reply.id
+            if msg.interactive.button_reply
+            else msg.interactive.list_reply.id if msg.interactive.list_reply else None
+        )
+        return MetaWhatsAppService.is_onboarding_action_id(action_id)
+
+    @staticmethod
+    def is_onboarding_action_id(action_id: Optional[str]) -> bool:
+        if not action_id:
+            return False
+        return (
+            action_id.startswith(("MSME_ONBOARD_", "LANG_"))
+            or action_id in ("PIN_SKIP", "ONBOARD_START", "ONBOARD_RESET", "RESET")
+        )
 
     def _normalize_message(
         self,
