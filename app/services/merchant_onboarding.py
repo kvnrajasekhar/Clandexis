@@ -13,8 +13,10 @@ import logging
 import re
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
+
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.services.conversation_language import (
     SUPPORTED_LANGUAGES,
@@ -29,6 +31,7 @@ from app.services.msme_validator import (
     validate_udyam,
     validate_upi_vpa,
 )
+from app.services.postgres_onboarding import PostgresOnboardingStore
 from config import settings
 from models.canonical import (
     CanonicalButton,
@@ -40,6 +43,45 @@ from models.canonical import (
 )
 
 logger = logging.getLogger("merchant-onboarding")
+
+_ONBOARDING_BUTTON_RE = re.compile(r"^MSME_ONBOARD_(CONFIRM|EDIT)(?:_([0-9a-f]{16}))?$")
+
+
+def _is_onboarding_action_id(action_id: str) -> bool:
+    return (
+        action_id.startswith(("MSME_ONBOARD_", "LANG_"))
+        or action_id in ("PIN_SKIP", "ONBOARD_START", "ONBOARD_RESET", "RESET")
+    )
+
+
+_CITY_ADDRESS_MAP = {
+    "Guntur": "Guntur, Andhra Pradesh",
+    "Dharmavaram": "Dharmavaram, Andhra Pradesh",
+    "Vijayawada": "Vijayawada, Andhra Pradesh",
+    "Hyderabad": "Hyderabad, Telangana",
+    "Sircilla": "Sircilla, Telangana",
+    "Surat": "Surat, Gujarat",
+    "Coimbatore": "Coimbatore, Tamil Nadu",
+    "Madurai": "Madurai, Tamil Nadu",
+    "Tiruppur": "Tiruppur, Tamil Nadu",
+    "Varanasi": "Varanasi, Uttar Pradesh",
+    "Jaipur": "Jaipur, Rajasthan",
+    "Ludhiana": "Ludhiana, Punjab",
+}
+
+
+class MSMEExtraction(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    business_name: Optional[str] = None
+    owner_name: Optional[str] = None
+    gstin: Optional[str] = None
+    udyam_reg_no: Optional[str] = None
+    pan: Optional[str] = None
+    address: Optional[str] = None
+    pincode: Optional[str] = None
+    upi_vpa: Optional[str] = None
+    detected_language: Optional[str] = None
 
 
 class OnboardingStep(str, Enum):
@@ -66,6 +108,9 @@ class OnboardingSession:
         self.business_address: Optional[str] = None
         self.pincode: Optional[str] = None
         self.upi_vpa: Optional[str] = None
+        self.confirmation_nonce: Optional[str] = None
+        self.editing: bool = False
+        self.revision: int = 1
         self.last_updated: datetime = datetime.now(timezone.utc)
         self.raw_extracted: Dict[str, Any] = {}
 
@@ -83,7 +128,58 @@ class OnboardingSession:
             "business_address": self.business_address,
             "pincode": self.pincode,
             "upi_vpa": self.upi_vpa,
+            "confirmation_nonce": self.confirmation_nonce,
+            "editing": self.editing,
+            "last_updated": self.last_updated.isoformat(),
+            "revision": self.revision,
         }
+
+    @classmethod
+    def from_dict(cls, state: Dict[str, Any], phone: str) -> "OnboardingSession":
+        if not isinstance(state, dict):
+            raise ValueError("Persisted onboarding state must be a JSON object")
+        stored_phone = state.get("phone")
+        if stored_phone and stored_phone != phone:
+            raise ValueError("Persisted onboarding state belongs to another phone")
+
+        session = cls(phone)
+        try:
+            session.step = OnboardingStep(state.get("step", OnboardingStep.INIT.value))
+        except ValueError as exc:
+            raise ValueError("Persisted onboarding state has an invalid step") from exc
+        for field in (
+            "preferred_language",
+            "script_preference",
+            "business_name",
+            "owner_name",
+            "gstin",
+            "udyam_reg_no",
+            "pan_number",
+            "business_address",
+            "pincode",
+            "upi_vpa",
+            "confirmation_nonce",
+        ):
+            value = state.get(field)
+            if value is not None:
+                if not isinstance(value, str):
+                    raise ValueError(f"Persisted onboarding field {field} must be a string")
+                setattr(session, field, value)
+        editing = state.get("editing", False)
+        if not isinstance(editing, bool):
+            raise ValueError("Persisted onboarding editing flag must be a boolean")
+        session.editing = editing
+        revision = state.get("revision", 1)
+        if not isinstance(revision, int) or revision < 1:
+            raise ValueError("Persisted onboarding revision must be a positive integer")
+        session.revision = revision
+        last_updated = state.get("last_updated")
+        if isinstance(last_updated, str):
+            try:
+                session.last_updated = datetime.fromisoformat(last_updated)
+            except ValueError:
+                session.last_updated = datetime.now(timezone.utc)
+        return session
 
 
 # Ephemeral in-memory session cache keyed by phone number
@@ -101,8 +197,13 @@ class MerchantOnboardingService:
     Orchestrates the entire multi-modal WhatsApp onboarding flow for merchants.
     """
 
-    def __init__(self, sessions: Optional[Dict[str, OnboardingSession]] = None):
+    def __init__(
+        self,
+        sessions: Optional[Dict[str, OnboardingSession]] = None,
+        store: Optional[PostgresOnboardingStore] = None,
+    ):
         self.sessions = sessions if sessions is not None else _ONBOARDING_SESSIONS
+        self.store = store
 
     def get_session(self, phone: str) -> OnboardingSession:
         if phone not in self.sessions:
@@ -119,12 +220,63 @@ class MerchantOnboardingService:
         Main entrypoint processing an inbound message from an unapproved / onboarding merchant.
         """
         phone = message.sender_phone
-        session = self.get_session(phone)
+        if self.store is None:
+            session = self.get_session(phone)
+            return await self._handle_onboarding_message(message, session, media_bytes=media_bytes)
+
+        claim = self.store.claim(message)
+        if claim.duplicate:
+            session = OnboardingSession.from_dict(claim.state, phone)
+            return self._build_duplicate_message(session)
+        if claim.busy:
+            session = OnboardingSession.from_dict(claim.state, phone)
+            return self._build_busy_message(session)
+        if claim.token is None:
+            raise RuntimeError("The onboarding store returned a claim without a lease token")
+
+        try:
+            session = OnboardingSession.from_dict(claim.state, phone)
+            outbound = await self._handle_onboarding_message(message, session, media_bytes=media_bytes)
+            button_match = _ONBOARDING_BUTTON_RE.fullmatch(message.interactive_id or "")
+            activate_merchant = bool(
+                session.step == OnboardingStep.COMPLETED
+                and button_match
+                and button_match.group(1) == "CONFIRM"
+            )
+            self.store.finish(
+                message,
+                claim.token,
+                session.to_dict(),
+                activate_merchant=activate_merchant,
+            )
+            if session.step == OnboardingStep.COMPLETED:
+                self.sessions.pop(phone, None)
+            else:
+                session.revision = int(claim.state.get("revision", 1)) + 1
+                self.sessions[phone] = session
+            return outbound
+        except Exception:
+            self.store.release(message, claim.token)
+            raise
+
+    async def _handle_onboarding_message(
+        self,
+        message: InboundMessage,
+        session: OnboardingSession,
+        *,
+        media_bytes: Optional[bytes] = None,
+    ) -> OutboundMessage:
+        phone = message.sender_phone
         session.last_updated = datetime.now(timezone.utc)
 
         # 0. User Reset / Restart Command
         raw_text = (message.text_content or "").strip().lower()
         button_id = message.interactive_id or (message.text_content or "").strip()
+        if _is_onboarding_action_id(button_id):
+            if session.step == OnboardingStep.COMPLETED or self._merchant_is_registered(phone):
+                session.step = OnboardingStep.COMPLETED
+                return self._build_stale_onboarding_action_message(session, account_active=True)
+
         if raw_text in ("reset", "/reset", "restart", "start over", "clear") or button_id in ("ONBOARD_RESET", "RESET"):
             logger.info("Resetting onboarding session for %s by user command", phone)
             session = OnboardingSession(phone)
@@ -154,12 +306,22 @@ class MerchantOnboardingService:
             return self._build_msme_collection_prompt(session)
 
         # Step C: MSME Confirmation Buttons
-        if button_id == "MSME_ONBOARD_CONFIRM" and session.step == OnboardingStep.AWAITING_CONFIRMATION:
-            return await self._commit_merchant_onboarding(session)
-
-        if button_id == "MSME_ONBOARD_EDIT" and session.step == OnboardingStep.AWAITING_CONFIRMATION:
+        action_match = _ONBOARDING_BUTTON_RE.fullmatch(button_id)
+        if action_match:
+            action, nonce = action_match.groups()
+            if session.step != OnboardingStep.AWAITING_CONFIRMATION or (
+                nonce != session.confirmation_nonce
+                and (nonce is not None or session.confirmation_nonce is not None)
+            ):
+                return self._build_stale_onboarding_action_message(session)
+            if action == "CONFIRM":
+                return await self._commit_merchant_onboarding(session)
             session.step = OnboardingStep.AWAITING_MSME_DETAILS
+            session.editing = True
+            session.confirmation_nonce = None
             return self._build_msme_collection_prompt(session, is_edit=True)
+        if button_id.startswith("MSME_ONBOARD_"):
+            return self._build_stale_onboarding_action_message(session)
 
         # 2. State-Specific Flow Processing
         if session.step == OnboardingStep.INIT:
@@ -189,7 +351,12 @@ class MerchantOnboardingService:
             from app.services.whatsapp_identity import resolve_phone
             # If PostgreSQL is configured and this phone is no longer found in merchants table,
             # it means database data was cleared/deleted. Reset stale in-memory session.
-            if settings.DATABASE_BACKEND == "postgres" and settings.DATABASE_URL and not resolve_phone(phone):
+            if (
+                self.store is None
+                and settings.DATABASE_BACKEND == "postgres"
+                and settings.DATABASE_URL
+                and not resolve_phone(phone)
+            ):
                 logger.warning(
                     "Phone %s has COMPLETED in-memory session but does not exist in PostgreSQL. Resetting session.",
                     phone,
@@ -386,6 +553,8 @@ class MerchantOnboardingService:
         Transcribes and extracts MSME onboarding details from vernacular voice notes using Gemini.
         Auto-detects spoken language (e.g. ta, te, hi, kn, en).
         """
+        from google.genai.errors import APIError
+
         try:
             from app.utils.client import get_genai_client
             from google.genai import types
@@ -415,18 +584,13 @@ class MerchantOnboardingService:
                 ],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
+                    response_schema=MSMEExtraction,
                     temperature=0.1,
                 ),
             )
-            raw = (res.text or "").strip()
-            if raw.startswith("```"):
-                raw = re.sub(r"^```[a-z]*\n?", "", raw)
-                raw = re.sub(r"\n?```$", "", raw)
-            data = json.loads(raw)
-            if isinstance(data, dict):
-                return data
-        except Exception as e:
-            logger.warning("Gemini audio extraction failed (%s)", e)
+            return self._decode_extraction_response(res.text)
+        except (APIError, ValidationError) as e:
+            logger.warning("Gemini audio extraction failed (%s)", type(e).__name__)
 
         return {}
 
@@ -434,6 +598,8 @@ class MerchantOnboardingService:
         """
         Extracts MSME details from an uploaded visiting card, GST cert, or Udyam cert photo using Gemini multimodal.
         """
+        from google.genai.errors import APIError
+
         try:
             from app.utils.client import get_genai_client
             from google.genai import types
@@ -459,20 +625,51 @@ class MerchantOnboardingService:
                 ],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
+                    response_schema=MSMEExtraction,
                     temperature=0.1,
                 ),
             )
-            raw = (res.text or "").strip()
-            if raw.startswith("```"):
-                raw = re.sub(r"^```[a-z]*\n?", "", raw)
-                raw = re.sub(r"\n?```$", "", raw)
-            data = json.loads(raw)
-            if isinstance(data, dict):
-                return data
-        except Exception as e:
-            logger.warning("Gemini image OCR extraction failed (%s)", e)
+            return self._decode_extraction_response(res.text)
+        except (APIError, ValidationError) as e:
+            logger.warning("Gemini image OCR extraction failed (%s)", type(e).__name__)
 
         return {}
+
+    @staticmethod
+    def _decode_extraction_response(response_text: Optional[str]) -> Dict[str, Any]:
+        if not response_text:
+            return {}
+        return MSMEExtraction.model_validate_json(response_text).model_dump(exclude_none=True)
+
+    async def _extract_from_text_with_gemini(self, text: str) -> Dict[str, Any]:
+        """Extract natural-language details without treating filler as part of a name."""
+        from google.genai.errors import APIError
+
+        try:
+            from app.utils.client import get_genai_client
+            from google.genai import types
+
+            prompt = (
+                "Extract Indian small-business onboarding details from the user's message. "
+                "Return only the fields supported by the message; use null for everything else. "
+                "Do not guess, expand abbreviations, or include phrases such as 'name is' in a business name. "
+                "Keep locations separate from business_name. For example, "
+                "'shop name is Sivasai Textiles in Guntur' means business_name='Sivasai Textiles' "
+                "and address='Guntur, Andhra Pradesh'."
+            )
+            response = get_genai_client().models.generate_content(
+                model=settings.EXTRACTOR_MODEL or "gemini-3.8-flash",
+                contents=[prompt, text],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=MSMEExtraction,
+                    temperature=0.1,
+                ),
+            )
+            return self._decode_extraction_response(response.text)
+        except (APIError, ValidationError) as e:
+            logger.warning("Gemini text extraction failed (%s)", type(e).__name__)
+            return {}
 
     async def _process_msme_intake(
         self,
@@ -500,13 +697,21 @@ class MerchantOnboardingService:
                         "pincode": flow_data.get("pincode"),
                         "upi_vpa": flow_data.get("upi_vpa") or flow_data.get("upi"),
                     }
-            except Exception:
-                pass
+            except json.JSONDecodeError:
+                logger.info("Ignoring malformed WhatsApp Flow JSON onboarding payload")
 
-        # 2. Conversational Text / Keywords
+        # 2. Explicitly labelled text fields and natural-language extraction
         if not extracted and message.text_content:
             text = message.text_content
             extracted = self._extract_from_text(text)
+            if not extracted.get("business_name"):
+                model_extracted = await self._extract_from_text_with_gemini(text)
+                if model_extracted.get("business_name"):
+                    model_extracted["business_name"] = self._normalize_business_name(
+                        model_extracted["business_name"],
+                        model_extracted,
+                    )
+                extracted.update({key: value for key, value in model_extracted.items() if value})
 
         # 3. Audio Voice Note
         if not extracted and message.message_type == MessageType.AUDIO and media_bytes:
@@ -539,6 +744,9 @@ class MerchantOnboardingService:
             session.pincode = extracted["pincode"].strip()
         if extracted.get("upi_vpa"):
             session.upi_vpa = extracted["upi_vpa"].strip()
+
+        if session.editing and not extracted:
+            return self._build_edit_retry_prompt(session)
 
         # If business name could not be identified, politely prompt for it in vernacular
         if not session.business_name:
@@ -578,6 +786,7 @@ class MerchantOnboardingService:
 
         # Transition to Confirmation
         session.step = OnboardingStep.AWAITING_CONFIRMATION
+        session.editing = False
         return self._build_confirmation_card(session, validation_errors)
 
     def _extract_from_text(self, text: str) -> Dict[str, Any]:
@@ -609,44 +818,55 @@ class MerchantOnboardingService:
             result["pincode"] = pin_match.group(1)
 
         # Names extraction
-        biz_match = re.search(r"(?:business|shop|dukaan|dukan|peru|name|store)[:\s]+([^,\n]+)", text, re.I)
+        biz_match = re.search(
+            r"(?:business(?:\s+name)?|shop(?:\s+name)?|dukaan|dukan|peru|name|store)\s*[:=]\s*([^,\n]+)",
+            text,
+            re.I,
+        )
         if biz_match:
             result["business_name"] = biz_match.group(1).strip()
 
-        owner_match = re.search(r"(?:owner|malik|proprietor)[:\s]+([^,\n]+)", text, re.I)
+        owner_match = re.search(r"(?:owner|malik|proprietor)\s*[:=]\s*([^,\n]+)", text, re.I)
         if owner_match:
             result["owner_name"] = owner_match.group(1).strip()
 
-        addr_match = re.search(r"(?:address|pata|chiru|location)[:\s]+([^,\n]+)", text, re.I)
+        addr_match = re.search(r"(?:address|pata|chiru|location)\s*[:=]\s*([^,\n]+)", text, re.I)
         if addr_match:
             result["address"] = addr_match.group(1).strip()
         else:
             city_match = re.search(r"\b(guntur|dharmavaram|sircilla|surat|coimbatore|madurai|hyderabad|vijayawada|varanasi|jaipur|ludhiana|tiruppur)\b", text, re.I)
             if city_match:
                 city = city_match.group(1).title()
-                state_map = {
-                    "Guntur": "Guntur, Andhra Pradesh",
-                    "Dharmavaram": "Dharmavaram, Andhra Pradesh",
-                    "Vijayawada": "Vijayawada, Andhra Pradesh",
-                    "Hyderabad": "Hyderabad, Telangana",
-                    "Sircilla": "Sircilla, Telangana",
-                    "Surat": "Surat, Gujarat",
-                    "Coimbatore": "Coimbatore, Tamil Nadu",
-                    "Madurai": "Madurai, Tamil Nadu",
-                    "Tiruppur": "Tiruppur, Tamil Nadu",
-                    "Varanasi": "Varanasi, Uttar Pradesh",
-                    "Jaipur": "Jaipur, Rajasthan",
-                    "Ludhiana": "Ludhiana, Punjab",
-                }
-                result["address"] = state_map.get(city, f"{city}, India")
+                result["address"] = _CITY_ADDRESS_MAP.get(city, f"{city}, India")
 
         return result
+
+    @staticmethod
+    def _normalize_business_name(value: str, extracted: Dict[str, Any]) -> str:
+        name = re.sub(
+            r"^(?:(?:my|our|the)\s+)?(?:shop(?:\s+name)?|business(?:\s+name)?|store|name)\s+(?:is|:)\s*",
+            "",
+            value.strip(),
+            flags=re.I,
+        )
+        location_match = re.search(
+            r"\s+in\s+(guntur|dharmavaram|sircilla|surat|coimbatore|madurai|hyderabad|"
+            r"vijayawada|varanasi|jaipur|ludhiana|tiruppur)\s*$",
+            name,
+            re.I,
+        )
+        if location_match:
+            city = location_match.group(1).title()
+            extracted.setdefault("address", _CITY_ADDRESS_MAP.get(city, f"{city}, India"))
+            name = name[: location_match.start()]
+        return name.strip()
 
     def _build_confirmation_card(
         self,
         session: OnboardingSession,
         errors: List[str],
     ) -> OutboundMessage:
+        session.confirmation_nonce = uuid4().hex[:16]
         lang = session.preferred_language
         biz = session.business_name or "Not provided"
         owner = session.owner_name or "Proprietor"
@@ -711,8 +931,8 @@ class MerchantOnboardingService:
             body += f"\n\n⚠️ *Format Note:* {'; '.join(errors)}"
 
         buttons = [
-            CanonicalButton(id="MSME_ONBOARD_CONFIRM", title=btn_confirm[:20]),
-            CanonicalButton(id="MSME_ONBOARD_EDIT", title=btn_edit[:20]),
+            CanonicalButton(id=f"MSME_ONBOARD_CONFIRM_{session.confirmation_nonce}", title=btn_confirm[:20]),
+            CanonicalButton(id=f"MSME_ONBOARD_EDIT_{session.confirmation_nonce}", title=btn_edit[:20]),
         ]
 
         return OutboundMessage(
@@ -740,41 +960,44 @@ class MerchantOnboardingService:
         clean_lang = session.preferred_language
         clean_script = session.script_preference
 
-        # 1. PostgreSQL commit if enabled
-        if settings.DATABASE_BACKEND == "postgres" and settings.DATABASE_URL:
-            try:
-                import psycopg
-                with psycopg.connect(settings.DATABASE_URL, connect_timeout=5) as conn:
-                    tax_json = json.dumps({
-                        "gstin": session.gstin,
-                        "udyam": session.udyam_reg_no,
-                        "address": session.business_address,
-                        "pincode": session.pincode,
-                        "upi_vpa": session.upi_vpa,
-                    })
-                    conn.execute(
-                        """
-                        INSERT INTO merchants (
-                            id, phone_e164, is_approved, business_name, owner_name,
-                            preferred_language, script_preference, tax_registration_number, tax_address
-                        ) VALUES (%s, %s, true, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (phone_e164) DO UPDATE SET
-                            is_approved = true,
-                            business_name = EXCLUDED.business_name,
-                            owner_name = EXCLUDED.owner_name,
-                            preferred_language = EXCLUDED.preferred_language,
-                            tax_registration_number = EXCLUDED.tax_registration_number,
-                            tax_address = EXCLUDED.tax_address
-                        """,
-                        (
-                            merchant_id, clean_phone, clean_biz, clean_owner,
-                            clean_lang, clean_script, session.gstin, tax_json
-                        )
-                    )
-                    conn.commit()
-                    logger.info("Committed merchant onboarding to PostgreSQL: %s (%s)", clean_phone, merchant_id)
-            except Exception as e:
-                logger.error("Failed to commit merchant onboarding to PostgreSQL: %s", e, exc_info=True)
+        # Durable production onboarding commits the merchant and message receipt atomically
+        # in PostgresOnboardingStore.finish. Preserve the legacy direct path for in-memory
+        # callers, but never report activation if its database write fails.
+        if self.store is None and settings.DATABASE_BACKEND == "postgres" and settings.DATABASE_URL:
+            import psycopg
+
+            with psycopg.connect(settings.DATABASE_URL, connect_timeout=5) as conn:
+                inserted = conn.execute(
+                    """
+                    INSERT INTO merchants (
+                        id, phone_e164, is_approved, business_name, owner_name,
+                        preferred_language, script_preference, tax_registration_number, tax_address
+                    ) VALUES (%s, %s, true, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (phone_e164) DO NOTHING
+                    RETURNING id
+                    """,
+                    (
+                        merchant_id,
+                        clean_phone,
+                        clean_biz,
+                        clean_owner,
+                        clean_lang,
+                        clean_script,
+                        session.gstin,
+                        json.dumps(
+                            {
+                                "gstin": session.gstin,
+                                "udyam": session.udyam_reg_no,
+                                "address": session.business_address,
+                                "pincode": session.pincode,
+                                "upi_vpa": session.upi_vpa,
+                            }
+                        ),
+                    ),
+                ).fetchone()
+                if inserted is None:
+                    raise RuntimeError("A merchant account already exists for this phone")
+            logger.info("Committed merchant onboarding to PostgreSQL")
 
         session.step = OnboardingStep.COMPLETED
 
@@ -830,16 +1053,82 @@ class MerchantOnboardingService:
     def _get_already_completed_message(self, session: OnboardingSession) -> str:
         lang = session.preferred_language
         if lang == "te":
+            if not session.business_name:
+                return "మీ Clandexis ఖాతా ఇప్పటికే యాక్టివ్‌లో ఉంది. లావాదేవీ వివరాలను కొత్త సందేశంగా పంపండి."
             return (
                 f"మీ వ్యాపారం *{session.business_name}* ఇప్పటికే యాక్టివేట్ అయింది. "
                 f"అమ్మకాలు నమోదు చేయడానికి మెసేజ్ లేదా వాయిస్ నోట్ పంపండి."
             )
         elif lang == "hi":
+            if not session.business_name:
+                return "आपका Clandexis खाता पहले से सक्रिय है। लेन-देन का विवरण नए संदेश के रूप में भेजें।"
             return (
                 f"आपका व्यापार *{session.business_name}* पहले से सक्रिय है। "
                 f"बिक्री दर्ज करने के लिए विवरण भेजें।"
             )
+        if not session.business_name:
+            return "Your Clandexis account is already active. Send transaction details as a new message."
         return (
             f"Your business *{session.business_name}* is already active. "
             f"Simply send your transaction details to post."
+        )
+
+    def _merchant_is_registered(self, phone: str) -> bool:
+        if self.store is None or settings.DATABASE_BACKEND != "postgres" or not settings.DATABASE_URL:
+            return False
+        from app.services.whatsapp_identity import resolve_phone
+
+        return bool(resolve_phone(phone))
+
+    def _build_duplicate_message(self, session: OnboardingSession) -> OutboundMessage:
+        if session.step == OnboardingStep.COMPLETED:
+            return self._build_stale_onboarding_action_message(session, account_active=True)
+        return OutboundMessage(
+            recipient_phone=session.phone,
+            text_content="This onboarding message was already processed. Send any new details as a new message.",
+        )
+
+    @staticmethod
+    def _build_busy_message(session: OnboardingSession) -> OutboundMessage:
+        return OutboundMessage(
+            recipient_phone=session.phone,
+            text_content="Your previous onboarding message is still being processed. Please try again shortly.",
+        )
+
+    def _build_stale_onboarding_action_message(
+        self,
+        session: OnboardingSession,
+        *,
+        account_active: bool = False,
+    ) -> OutboundMessage:
+        if account_active:
+            if session.preferred_language == "te":
+                text = "మీ ఖాతా ఇప్పటికే యాక్టివ్‌లో ఉంది. ఈ పాత నమోదు బటన్‌తో లావాదేవీ నమోదు చేయబడలేదు."
+            elif session.preferred_language == "hi":
+                text = "आपका खाता पहले से सक्रिय है। इस पुराने पंजीकरण बटन से कोई लेन-देन दर्ज नहीं हुआ।"
+            else:
+                text = "Your account is already active. This old registration button did not create a transaction."
+        else:
+            if session.preferred_language == "te":
+                text = "ఈ నమోదు బటన్ గడువు ముగిసింది. కొత్త నిర్ధారణ కార్డు కోసం వివరాలను మళ్లీ పంపండి."
+            elif session.preferred_language == "hi":
+                text = "यह पंजीकरण बटन अब मान्य नहीं है। नया पुष्टि कार्ड पाने के लिए विवरण फिर से भेजें।"
+            else:
+                text = "This registration button is no longer valid. Send your details again to get a fresh confirmation card."
+        return OutboundMessage(
+            recipient_phone=session.phone,
+            message_type=MessageType.TEXT,
+            text_content=text,
+        )
+
+    @staticmethod
+    def _build_edit_retry_prompt(session: OnboardingSession) -> OutboundMessage:
+        text = (
+            "I couldn't identify a business detail to update. Please send the field and its new value, "
+            "for example: Business name: Sivasai Textiles."
+        )
+        return OutboundMessage(
+            recipient_phone=session.phone,
+            message_type=MessageType.TEXT,
+            text_content=text,
         )

@@ -177,8 +177,87 @@ async def test_msme_collection_via_text_and_confirmation_card():
     assert out_card.message_type == MessageType.INTERACTIVE_BUTTON
     assert "వ్యాపార వివరాల నిర్ధారణ" in (out_card.interactive_header or "")
     btn_ids = [b.id for b in (out_card.buttons or [])]
-    assert "MSME_ONBOARD_CONFIRM" in btn_ids
-    assert "MSME_ONBOARD_EDIT" in btn_ids
+    assert any(btn_id.startswith("MSME_ONBOARD_CONFIRM_") for btn_id in btn_ids)
+    assert any(btn_id.startswith("MSME_ONBOARD_EDIT_") for btn_id in btn_ids)
+
+
+@pytest.mark.asyncio
+async def test_natural_language_shop_name_uses_structured_extraction(monkeypatch):
+    service = MerchantOnboardingService(sessions={})
+    phone = "+919876500009"
+    session = service.get_session(phone)
+    session.step = OnboardingStep.AWAITING_MSME_DETAILS
+    text = "shop name is sivasai textiles in guntur"
+    model_inputs = []
+
+    async def mock_extract(input_text):
+        model_inputs.append(input_text)
+        return {"business_name": "name is Sivasai Textiles in Guntur"}
+
+    monkeypatch.setattr(service, "_extract_from_text_with_gemini", mock_extract)
+    msg = InboundMessage(
+        message_id="msg_natural_language_shop_name",
+        tenant_id=phone,
+        sender_phone=phone,
+        message_type=MessageType.TEXT,
+        text_content=text,
+    )
+
+    out = await service.handle_onboarding_message(msg)
+
+    assert model_inputs == [text]
+    assert session.business_name == "Sivasai Textiles"
+    assert session.business_address == "Guntur, Andhra Pradesh"
+    assert out.message_type == MessageType.INTERACTIVE_BUTTON
+
+
+@pytest.mark.asyncio
+async def test_activated_merchant_edit_button_does_not_enter_confirmation(monkeypatch):
+    service = MerchantOnboardingService(sessions={})
+    monkeypatch.setattr(service, "_merchant_is_registered", lambda phone: True)
+    phone = "+919876500010"
+    session = service.get_session(phone)
+    session.step = OnboardingStep.AWAITING_CONFIRMATION
+    session.confirmation_nonce = "1111111111111111"
+    session.business_name = "Sivasai Textiles"
+    msg_edit = InboundMessage(
+        message_id="msg_stale_edit_after_activation",
+        tenant_id=phone,
+        sender_phone=phone,
+        message_type=MessageType.INTERACTIVE_BUTTON,
+        interactive_id="MSME_ONBOARD_EDIT_2222222222222222",
+    )
+
+    out = await service.handle_onboarding_message(msg_edit)
+
+    assert session.step == OnboardingStep.COMPLETED
+    assert "already active" in (out.text_content or "")
+    assert "Invalid confirmation button" not in (out.text_content or "")
+
+
+@pytest.mark.asyncio
+async def test_completed_persisted_session_does_not_render_missing_business_name(monkeypatch):
+    from config import settings
+    monkeypatch.setattr(settings, "DATABASE_BACKEND", "firestore")
+
+    phone = "+919876500011"
+    session = OnboardingSession.from_dict(
+        {"phone": phone, "step": "COMPLETED", "preferred_language": "en"},
+        phone,
+    )
+    service = MerchantOnboardingService(sessions={phone: session})
+    msg = InboundMessage(
+        message_id="msg_after_persisted_activation",
+        tenant_id=phone,
+        sender_phone=phone,
+        message_type=MessageType.TEXT,
+        text_content="hello",
+    )
+
+    out = await service.handle_onboarding_message(msg)
+
+    assert "already active" in (out.text_content or "")
+    assert "None" not in (out.text_content or "")
 
 
 @pytest.mark.asyncio
@@ -213,7 +292,10 @@ async def test_msme_collection_via_flow_json():
 
 
 @pytest.mark.asyncio
-async def test_confirmation_card_approval_completes_onboarding():
+async def test_confirmation_card_approval_completes_onboarding(monkeypatch):
+    from config import settings
+    monkeypatch.setattr(settings, "DATABASE_BACKEND", "firestore")
+    monkeypatch.setattr(settings, "DATABASE_URL", "")
     service = MerchantOnboardingService(sessions={})
     phone = "+919876500006"
     session = service.get_session(phone)

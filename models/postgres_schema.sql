@@ -33,6 +33,36 @@ CREATE TABLE merchants (
     UNIQUE (id, phone_e164)
 );
 
+-- Active onboarding state is isolated by sender phone and expires after inactivity.
+-- Event rows contain message IDs/types only; raw inbound text and media are not stored.
+CREATE TABLE merchant_onboarding_sessions (
+    sender_phone text PRIMARY KEY CHECK (sender_phone ~ '^\+[1-9][0-9]{7,14}$'),
+    session_state jsonb NOT NULL DEFAULT '{}' CHECK (jsonb_typeof(session_state) = 'object'),
+    step text NOT NULL DEFAULT 'INIT'
+        CHECK (step IN ('INIT','AWAITING_LANGUAGE','AWAITING_PIN','AWAITING_MSME_DETAILS',
+            'AWAITING_CONFIRMATION','COMPLETED')),
+    revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
+    expires_at timestamptz NOT NULL DEFAULT (now() + interval '30 days'),
+    lease_token uuid,
+    lease_until timestamptz,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CHECK ((lease_token IS NULL) = (lease_until IS NULL))
+);
+
+CREATE TABLE merchant_onboarding_events (
+    sender_phone text NOT NULL
+        REFERENCES merchant_onboarding_sessions(sender_phone) ON DELETE CASCADE,
+    external_message_id text NOT NULL CHECK (btrim(external_message_id) <> ''),
+    message_type text NOT NULL,
+    interactive_id text,
+    processing_status text NOT NULL DEFAULT 'RECEIVED'
+        CHECK (processing_status IN ('RECEIVED','PROCESSING','DEFERRED','DONE','FAILED')),
+    received_at timestamptz NOT NULL DEFAULT now(),
+    expires_at timestamptz NOT NULL DEFAULT (now() + interval '30 days'),
+    processed_at timestamptz,
+    PRIMARY KEY (sender_phone, external_message_id)
+);
+
 CREATE TABLE parties (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     merchant_id uuid NOT NULL REFERENCES merchants(id),
@@ -372,6 +402,7 @@ FROM parties p LEFT JOIN party_balance_movements m ON m.merchant_id=p.merchant_i
 GROUP BY p.merchant_id,p.id;
 
 CREATE INDEX messages_received_idx ON workflow_messages(merchant_id,received_at DESC);
+CREATE INDEX onboarding_events_expiry_idx ON merchant_onboarding_events(sender_phone,expires_at);
 CREATE INDEX candidates_pending_idx ON transaction_candidates(merchant_id,posting_status,expires_at);
 CREATE INDEX transactions_business_date_idx ON transactions(merchant_id,business_date DESC);
 CREATE INDEX payments_transaction_idx ON payments(merchant_id,transaction_id);
@@ -602,11 +633,23 @@ END $$;
 DO $$
 DECLARE tab text;
 BEGIN
+    ALTER TABLE merchant_onboarding_sessions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE merchant_onboarding_sessions FORCE ROW LEVEL SECURITY;
+    CREATE POLICY onboarding_phone_scope ON merchant_onboarding_sessions USING
+        (sender_phone = nullif(current_setting('app.onboarding_phone',true),''))
+        WITH CHECK (sender_phone = nullif(current_setting('app.onboarding_phone',true),''));
+    ALTER TABLE merchant_onboarding_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE merchant_onboarding_events FORCE ROW LEVEL SECURITY;
+    CREATE POLICY onboarding_phone_scope ON merchant_onboarding_events USING
+        (sender_phone = nullif(current_setting('app.onboarding_phone',true),''))
+        WITH CHECK (sender_phone = nullif(current_setting('app.onboarding_phone',true),''));
     ALTER TABLE merchants ENABLE ROW LEVEL SECURITY;
     ALTER TABLE merchants FORCE ROW LEVEL SECURITY;
     CREATE POLICY merchant_scope ON merchants USING
         (id = nullif(current_setting('app.merchant_id',true),'')::uuid AND is_approved)
         WITH CHECK (id = nullif(current_setting('app.merchant_id',true),'')::uuid AND is_approved);
+    CREATE POLICY merchant_phone_lookup ON merchants FOR SELECT USING
+        (is_approved AND phone_e164 = nullif(current_setting('app.phone_lookup',true),''));
     FOREACH tab IN ARRAY ARRAY['parties','products','workflow_messages','transaction_candidates','candidate_reviews',
         'conversations','confirmations','transactions','transaction_items','payments','party_balance_movements',
         'inventory_movements','journal_entries','journal_lines','invoices','invoice_artifacts','idempotency_keys'] LOOP
@@ -618,6 +661,8 @@ END $$;
 
 COMMENT ON TABLE transactions IS 'Append-only committed ledger. Insert all components and terminal candidate state in one SQL transaction.';
 COMMENT ON TABLE merchants IS 'One explicitly approved WhatsApp user phone per merchant; business transport phone is not a merchant identity.';
+COMMENT ON TABLE merchant_onboarding_sessions IS 'Active onboarding state; sensitive fields expire after 30 days of inactivity and are cleared on activation.';
+COMMENT ON TABLE merchant_onboarding_events IS 'Short-lived idempotency records; stores message identifiers and types, never raw inbound content.';
 COMMENT ON TABLE transaction_candidates IS 'Schema 1.1 snapshots; DB hash is PostgreSQL JSONB serialization, not the legacy Firestore hash.';
 COMMENT ON TABLE invoices IS 'BASIC by default. Tax details and an implemented tax-rule version are required before declaring a tax invoice.';
 COMMIT;

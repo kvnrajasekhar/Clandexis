@@ -156,6 +156,14 @@ def orchestrate_inbound_message(
             recipient_phone=message.sender_phone,
             text_content="Unsupported message type. Nothing posted.",
         )
+    if message.interactive_id and (
+        message.interactive_id.startswith(("MSME_ONBOARD_", "LANG_"))
+        or message.interactive_id in ("PIN_SKIP", "ONBOARD_START", "ONBOARD_RESET", "RESET")
+    ):
+        return None, OutboundMessage(
+            recipient_phone=message.sender_phone,
+            text_content="This onboarding button is no longer available. Send your transaction details as a new message.",
+        )
 
     durable_processing = conversation is not None
     conversation = conversation if conversation is not None else {}

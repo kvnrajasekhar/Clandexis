@@ -14,6 +14,25 @@ psql -v ON_ERROR_STOP=1 -f models/postgres_schema.sql
 
 The script is fresh-install DDL. Existing databases need a separately reviewed migration before this file is applied.
 
+## Add durable WhatsApp onboarding to an existing database
+
+The onboarding service stores unfinished session state and message-id idempotency records in PostgreSQL. Before deploying code that enables this store, apply the additive migration with a migration-owner connection:
+
+```bash
+psql -v ON_ERROR_STOP=1 -f models/migrations/20261121_merchant_onboarding.sql
+```
+
+Grant the configured runtime role access to the two new tables (replace `clandexis_app` with that role):
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE
+  ON merchant_onboarding_sessions, merchant_onboarding_events TO clandexis_app;
+```
+
+The runtime sets `app.onboarding_phone` from the signed WhatsApp sender identity for each transaction; row-level policies restrict session and event access to that phone. The migration also adds a phone-scoped `SELECT` policy for approved merchant identity resolution, which sets `app.phone_lookup`; it does not widen ordinary merchant data access. Raw inbound text and media are not written to the onboarding tables. Pending business details are treated as expired after 30 days of inactivity and cleared on the next message; activation clears the persisted draft fields. Event records are usable for deduplication for 30 days and expired rows are pruned on subsequent activity from that sender.
+
+Do not run the migration against production or deploy the new service until the target database, runtime grants, and migration result have been reviewed. The migration is not applied automatically at startup.
+
 For an application role named `clandexis_app`, the administrator grants:
 
 ```sql
@@ -21,7 +40,7 @@ GRANT USAGE ON SCHEMA public TO clandexis_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO clandexis_app;
 ```
 
-Keep schema ownership, DDL, superuser, `BYPASSRLS`, and `TRUNCATE` privileges with administration. Runtime connections set `app.merchant_id` to the merchant UUID resolved from the trusted session or approved phone map. All SQL table relationships and operations remain merchant-scoped.
+Keep schema ownership, DDL, superuser, `BYPASSRLS`, and `TRUNCATE` privileges with administration. Runtime connections set `app.merchant_id` to the merchant UUID resolved from the trusted session or approved phone lookup. Phone resolution sets only `app.phone_lookup` to the signed sender number and can read only the matching approved merchant identity. All other SQL table relationships and operations remain merchant-scoped.
 
 ## Configure the application
 

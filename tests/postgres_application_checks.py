@@ -1,5 +1,6 @@
 """Run explicitly with PostgreSQL configuration; no mocked database or ledger writes."""
 
+import asyncio
 import json, os
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -10,6 +11,8 @@ import pytest
 from fastapi.testclient import TestClient
 from app.services import postgres_ledger as ledger
 from app.services.postgres_db import PostgresDatabase
+from app.services.postgres_onboarding import PostgresOnboardingStore
+from app.services.merchant_onboarding import MerchantOnboardingService
 from app.services.confirmation import get_confirmation_service, button_id
 from app.services import posting_flow
 from app.services.whatsapp_conversation import process_whatsapp_message
@@ -73,6 +76,7 @@ def app_client(monkeypatch, tmp_path):
     class Meta(application.MetaWhatsAppService):
         def __init__(self):
             self.phone_number_id = "phone"
+            self.allowed_phone_number_ids = {"phone"}
 
         async def close(self):
             pass
@@ -144,6 +148,111 @@ def callback(client, phone, event, kind, fields):
             "X-Hub-Signature-256": "sha256=" + sig,
         },
     )
+
+
+def test_durable_onboarding_survives_service_restart_and_deduplicates(app_client):
+    _, db, _, _, _, _, _, _ = app_client
+    phone = "+91" + str(int(uuid4().hex[:10], 16) % 9000000000 + 1000000000)
+
+    class RecordingStore(PostgresOnboardingStore):
+        activated_merchant_id = None
+
+        def finish(self, message, token, session_state, *, activate_merchant=False):
+            merchant_id = super().finish(
+                message,
+                token,
+                session_state,
+                activate_merchant=activate_merchant,
+            )
+            if activate_merchant:
+                self.activated_merchant_id = merchant_id
+            return merchant_id
+
+    store = RecordingStore(application.settings.DATABASE_URL)
+
+    def run(message):
+        return asyncio.run(MerchantOnboardingService(sessions={}, store=store).handle_onboarding_message(message))
+
+    def inbound(event, *, kind=MessageType.TEXT, text_content=None, interactive_id=None):
+        return InboundMessage(
+            message_id=event,
+            tenant_id=phone,
+            sender_phone=phone,
+            message_type=kind,
+            text_content=text_content,
+            interactive_id=interactive_id,
+        )
+
+    merchant_id = None
+    try:
+        run(inbound("onboard-start", text_content="Hello"))
+        run(inbound(
+            "onboard-language",
+            kind=MessageType.INTERACTIVE_LIST,
+            interactive_id="LANG_EN",
+        ))
+        card = run(inbound(
+            "onboard-details",
+            text_content='{"business_name":"Sivasai Textiles","address":"Guntur, Andhra Pradesh"}',
+        ))
+        confirm_id = next(button.id for button in card.buttons if button.id.startswith("MSME_ONBOARD_CONFIRM_"))
+        final = run(inbound(
+            "onboard-confirm",
+            kind=MessageType.INTERACTIVE_BUTTON,
+            text_content="Confirm & Start",
+            interactive_id=confirm_id,
+        ))
+        merchant_id = store.activated_merchant_id
+        assert merchant_id
+        assert "ACTIVE" in (final.text_content or "")
+
+        replay = run(inbound(
+            "onboard-confirm",
+            kind=MessageType.INTERACTIVE_BUTTON,
+            text_content="Confirm & Start",
+            interactive_id=confirm_id,
+        ))
+        assert "already active" in (replay.text_content or "").lower()
+
+        with db.transaction(merchant_id) as conn:
+            row = conn.execute(
+                "SELECT phone_e164, business_name, is_approved FROM merchants WHERE id=%s",
+                (merchant_id,),
+            ).fetchone()
+            assert row == {
+                "phone_e164": phone,
+                "business_name": "Sivasai Textiles",
+                "is_approved": True,
+            }
+        import psycopg
+
+        with psycopg.connect(application.settings.DATABASE_URL) as conn:
+            conn.execute("SELECT set_config('app.onboarding_phone', %s, true)", (phone,))
+            session = conn.execute(
+                "SELECT step, session_state FROM merchant_onboarding_sessions WHERE sender_phone=%s",
+                (phone,),
+            ).fetchone()
+            done_events = conn.execute(
+                "SELECT count(*) FROM merchant_onboarding_events "
+                "WHERE sender_phone=%s AND processing_status='DONE'",
+                (phone,),
+            ).fetchone()[0]
+            assert session[0] == "COMPLETED"
+            assert "business_name" not in session[1]
+            assert done_events == 4
+
+    finally:
+        import psycopg
+
+        with psycopg.connect(application.settings.DATABASE_URL) as conn:
+            conn.execute("SELECT set_config('app.onboarding_phone', %s, true)", (phone,))
+            conn.execute(
+                "DELETE FROM merchant_onboarding_sessions WHERE sender_phone=%s",
+                (phone,),
+            )
+            if merchant_id:
+                conn.execute("SELECT set_config('app.merchant_id', %s, true)", (merchant_id,))
+                conn.execute("DELETE FROM merchants WHERE id=%s", (merchant_id,))
 
 
 def mock_pipeline(monkeypatch, tx):

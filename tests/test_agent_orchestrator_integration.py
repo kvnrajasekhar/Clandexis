@@ -53,3 +53,23 @@ def test_non_financial_intents_never_stage(monkeypatch, intent):
         message_type=MessageType.TEXT, text_content="Unsupported request"))
     assert not ledger.rows and ledger.post_count == 0
     assert "Nothing posted" in out.text_content
+
+
+def test_stale_onboarding_button_never_reaches_transaction_pipeline(monkeypatch):
+    import agent_orchestrator.orchestrator as orchestrator
+    monkeypatch.setattr(
+        orchestrator,
+        "pipeline",
+        SimpleNamespace(process_and_interpret=lambda **kw: pytest.fail("Onboarding button reached extraction")),
+    )
+
+    _, outbound = orchestrator.orchestrate_inbound_message(InboundMessage(
+        message_id="stale-onboarding-edit",
+        tenant_id="merchant",
+        sender_phone="+919876543210",
+        message_type=MessageType.INTERACTIVE_BUTTON,
+        text_content="Edit Details",
+        interactive_id="MSME_ONBOARD_EDIT_0123456789abcdef",
+    ))
+
+    assert "no longer available" in outbound.text_content

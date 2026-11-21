@@ -151,21 +151,33 @@ async def handle_meta_webhook(
         except Exception as e:
             logger.error(f"Failed to process message {msg.message_id}: {e}", exc_info=True)
 
-    # 3. Handle unregistered senders via dynamic WhatsApp onboarding workflow
-    unregistered_messages = []
-    if settings.ENABLE_WHATSAPP_ONBOARDING:
-        unregistered_messages = meta_service.parse_unregistered_inbound_messages(raw_json)
-        for unreg_msg in unregistered_messages:
-            logger.info(
-                f"Received Onboarding InboundMessage: id={unreg_msg.message_id}, type={unreg_msg.message_type}, "
-                f"sender={unreg_msg.sender_phone}, interactive_id={unreg_msg.interactive_id}"
+    # 3. Handle unregistered senders and stale onboarding buttons. The latter must
+    # never enter transaction confirmation, even after the merchant is activated.
+    onboarding_messages = meta_service.parse_unregistered_inbound_messages(
+        raw_json,
+        include_registered_onboarding_actions=True,
+    )
+    if not settings.ENABLE_WHATSAPP_ONBOARDING:
+        onboarding_messages = [
+            message for message in onboarding_messages
+            if (
+                message.tenant_id != message.sender_phone
+                and meta_service.is_onboarding_action_id(message.interactive_id)
             )
-            try:
-                await process_onboarding_message(unreg_msg)
-            except Exception as e:
-                logger.error(f"Failed to process onboarding message {unreg_msg.message_id}: {e}", exc_info=True)
+        ]
+    for onboarding_message in onboarding_messages:
+        logger.info(
+            "Received onboarding message id=%s type=%s interactive_id=%s",
+            onboarding_message.message_id,
+            onboarding_message.message_type,
+            onboarding_message.interactive_id,
+        )
+        try:
+            await process_onboarding_message(onboarding_message)
+        except Exception as e:
+            logger.error("Failed to process onboarding message %s (%s)", onboarding_message.message_id, type(e).__name__)
 
-    total_received = len(inbound_messages) + len(unregistered_messages)
+    total_received = len(inbound_messages) + len(onboarding_messages)
     return {"status": "ok", "messages_received": total_received}
 
 
@@ -173,21 +185,47 @@ async def process_onboarding_message(message: InboundMessage):
     """
     Background worker passing unapproved / unregistered merchant message to Onboarding State Machine.
     """
-    logger.info(f"Processing onboarding message {message.message_id} for {message.sender_phone}...")
+    logger.info("Processing onboarding message id=%s", message.message_id)
+    outbound = None
     try:
         from app.services.merchant_onboarding import MerchantOnboardingService
-        service = MerchantOnboardingService()
+        from app.services.postgres_onboarding import PostgresOnboardingStore
+
+        store = (
+            PostgresOnboardingStore(settings.DATABASE_URL)
+            if settings.DATABASE_BACKEND == "postgres"
+            else None
+        )
+        service = MerchantOnboardingService(store=store)
         media_bytes = None
         if message.message_type in (MessageType.AUDIO, MessageType.IMAGE, MessageType.DOCUMENT):
             if meta_service is not None and message.media_id and message.media_mime_type:
                 media_bytes = await meta_service.download_media_bytes(message.media_id)
-        outbound = await service.handle_onboarding_message(message, media_bytes=media_bytes)
-        if meta_service and outbound:
-            if message.recipient_phone_id:
-                outbound.sender_phone_id = message.recipient_phone_id
-            await meta_service.dispatch_outbound(outbound, phone_number_id=message.recipient_phone_id)
-    except Exception as e:
-        logger.error(f"Onboarding flow failed for {message.sender_phone}: {e}", exc_info=True)
+            if not media_bytes:
+                outbound = OutboundMessage(
+                    recipient_phone=message.sender_phone,
+                    text_content="We couldn't read that attachment. Please resend it or type the details.",
+                )
+            else:
+                outbound = await service.handle_onboarding_message(message, media_bytes=media_bytes)
+        else:
+            outbound = await service.handle_onboarding_message(message, media_bytes=media_bytes)
+    except Exception as exc:
+        from app.core.observability import record_exception
+
+        error_id = record_exception(logger, "whatsapp.onboarding", exc)
+        outbound = OutboundMessage(
+            recipient_phone=message.sender_phone,
+            text_content=(
+                "We couldn't safely save your registration. Please retry the last step. "
+                f"Reference: {error_id}"
+            ),
+        )
+
+    if meta_service and outbound:
+        if message.recipient_phone_id:
+            outbound.sender_phone_id = message.recipient_phone_id
+        await meta_service.dispatch_outbound(outbound, phone_number_id=message.recipient_phone_id)
 
 
 async def process_inbound_message(message: InboundMessage):

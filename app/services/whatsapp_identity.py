@@ -69,6 +69,7 @@ def resolve_phone(value: str) -> str | None:
         try:
             import psycopg
             with psycopg.connect(settings.DATABASE_URL, connect_timeout=5) as conn:
+                conn.execute("SELECT set_config('app.phone_lookup', %s, true)", (phone,))
                 row = conn.execute(
                     "SELECT id FROM merchants WHERE phone_e164 = %s AND is_approved = true LIMIT 1",
                     (phone,)

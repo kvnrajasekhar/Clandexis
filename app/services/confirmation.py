@@ -104,8 +104,10 @@ class ConfirmationService:
             if message.interactive_id and (
                 message.interactive_id.startswith("retry_")
                 or message.interactive_id.startswith("LANG_")
+                or message.interactive_id.startswith("MSME_ONBOARD_")
                 or message.interactive_id.startswith("view_pdf_")
                 or message.interactive_id.startswith("view_ledger_")
+                or message.interactive_id in ("PIN_SKIP", "ONBOARD_START", "ONBOARD_RESET", "RESET")
             ):
                 return None
             match = _ID.fullmatch(message.interactive_id or "")
