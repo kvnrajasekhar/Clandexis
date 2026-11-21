@@ -129,7 +129,7 @@ def orchestrate_inbound_message(
     try:
         if message.message_type == MessageType.TEXT and (
             message.text_content or ""
-        ).strip().upper() in ("YES", "NO", "AVUNU", "HAAN", "AAMA"):
+        ).strip().upper() in ("YES", "NO", "AVUNU", "HAAN", "AAMA", "CONFIRM", "CANCEL", "సరే", "சரி"):
             if conversation.get("active_candidate_id"):
                 row = service.ledger.get_candidate(
                     merchant.merchant_id, conversation["active_candidate_id"]
@@ -139,6 +139,36 @@ def orchestrate_inbound_message(
                     return None, OutboundMessage(
                         recipient_phone=message.sender_phone,
                         text_content=f"{clarification}\n\n(Please provide the missing details first before confirming.)",
+                    )
+                if (message.text_content or "").strip().upper() in ("YES", "AVUNU", "HAAN", "AAMA", "CONFIRM", "సరే", "சரி"):
+                    result = service.handle_confirmation(
+                        merchant, row.candidate_id, "confirm", message.message_id
+                    )
+                    conversation["last_candidate_id"] = row.candidate_id
+                    conversation.update(
+                        active_candidate_id=None,
+                        latest_question=None,
+                        missing_fields=[],
+                        candidate_revision=None,
+                        expires_at=None,
+                    )
+                    if isinstance(result, PostingResult):
+                        return result, posting_outbound(message.sender_phone, result, language, script)
+                else:
+                    result = service.handle_confirmation(
+                        merchant, row.candidate_id, "cancel", message.message_id
+                    )
+                    conversation.update(
+                        active_candidate_id=None,
+                        latest_question=None,
+                        missing_fields=[],
+                        candidate_revision=None,
+                        expires_at=None,
+                    )
+                    labels = copy_for(language, script)
+                    return None, OutboundMessage(
+                        recipient_phone=message.sender_phone,
+                        text_content=labels["cancelled"],
                     )
             raise ConfirmationError(
                 "Use the Confirm or Cancel button for the specific candidate."
@@ -216,40 +246,65 @@ def orchestrate_inbound_message(
                     "Please resend your transaction."
                 ),
             )
-        if (message.text_content or "").strip().lower() == "continue":
+        from app.services.decision_service import DecisionService
+        decision_info = DecisionService().classify_merchant_intent(
+            message.text_content, has_active_candidate=True
+        )
+        intent = decision_info.get("intent")
+        raw_msg = (message.text_content or "").strip().lower()
+
+        # A. Query pending status (e.g. "What are pending", "status", "చూపించు", "நிலுவை")
+        if intent == "query_pending_status" or raw_msg in ("continue", "pending", "status", "what are pending", "details"):
+            labels = copy_for(language, script)
+            summary = candidate_summary(row.candidate, row.candidate_id, language, script, review=row.candidate.requires_review)
+            clarification = conversation.get("latest_question")
+            body = f"{clarification}\n\n{summary}" if clarification else summary
+            buttons = [CanonicalButton(id=button_id(row.candidate_id, "cancel"), title=labels["cancel"])]
+            if not row.candidate.requires_review and not row.candidate.needs_clarification:
+                buttons.insert(0, CanonicalButton(id=button_id(row.candidate_id, "confirm"), title=labels["confirm"]))
             return None, OutboundMessage(
                 recipient_phone=message.sender_phone,
-                text_content=conversation.get("latest_question")
-                or (
-                    f"Review candidate {row.candidate_id} and use its "
-                    "Confirm or Cancel button."
-                ),
-            )
-        if (
-            not row.candidate.needs_clarification and not row.candidate.requires_review
-        ) or re.search(
-            r"\b(sold|sell|sale|ammanu|ammnu|purchase|bought|stock|repaid|becha|bechi)\b|అమ్మ|बेच",
-            message.text_content or "",
-            re.I,
-        ):
-            return None, OutboundMessage(
-                recipient_phone=message.sender_phone,
-                text_content=(
-                    f"Continue candidate {row.candidate_id} or cancel it before "
-                    "starting another transaction."
-                ),
                 message_type=MessageType.INTERACTIVE_BUTTON,
-                interactive_body=(
-                    f"Continue the pending candidate {row.candidate_id}, or cancel "
-                    "it and resend the new transaction."
-                ),
+                interactive_header="📋 " + labels.get("confirm_heading", "Pending Transaction"),
+                interactive_body=body,
+                interactive_footer="Clandexis Invisible ERP",
+                buttons=buttons,
+                text_content=body,
+            )
+
+        # B. Direct confirmation via text
+        if intent == "confirm_candidate" or raw_msg in ("yes", "confirm", "ok", "sare", "avunu", "theek", "சரி", "సరే", "हाँ"):
+            if not row.candidate.needs_clarification and not row.candidate.requires_review:
+                result = service.handle_confirmation(merchant, row.candidate_id, "confirm", message.message_id)
+                conversation["last_candidate_id"] = row.candidate_id
+                conversation.update(active_candidate_id=None, latest_question=None, missing_fields=[], candidate_revision=None, expires_at=None)
+                if isinstance(result, PostingResult):
+                    return result, posting_outbound(message.sender_phone, result, language, script)
+            else:
+                clarification = conversation.get("latest_question") or "Please provide the missing details first before confirming."
+                return None, OutboundMessage(recipient_phone=message.sender_phone, text_content=clarification)
+
+        # C. Direct cancellation via text
+        if intent == "cancel_candidate" or raw_msg in ("cancel", "no", "vaddu", "raddu", "vendam", "వద్దు", "రద్దు", "வேண்டாம்"):
+            result = service.handle_confirmation(merchant, row.candidate_id, "cancel", message.message_id)
+            conversation.update(active_candidate_id=None, latest_question=None, missing_fields=[], candidate_revision=None, expires_at=None)
+            labels = copy_for(language, script)
+            return None, OutboundMessage(recipient_phone=message.sender_phone, text_content=labels["cancelled"])
+
+        # D. Starting a new sale while previous candidate is fully ready (not in review)
+        if intent == "new_sale" and not row.candidate.needs_clarification and not row.candidate.requires_review:
+            labels = copy_for(language, script)
+            return None, OutboundMessage(
+                recipient_phone=message.sender_phone,
+                text_content=f"You have a pending transaction {row.candidate_id}. Please confirm or cancel it first.",
+                message_type=MessageType.INTERACTIVE_BUTTON,
+                interactive_body=f"You have an unconfirmed transaction waiting. Would you like to confirm it or cancel it?",
                 buttons=[
-                    CanonicalButton(
-                        id=button_id(row.candidate_id, "cancel"),
-                        title="Cancel pending",
-                    )
+                    CanonicalButton(id=button_id(row.candidate_id, "confirm"), title=labels["confirm"]),
+                    CanonicalButton(id=button_id(row.candidate_id, "cancel"), title=labels["cancel"]),
                 ],
             )
+
         reviewing = row
 
     raw_text = message.text_content

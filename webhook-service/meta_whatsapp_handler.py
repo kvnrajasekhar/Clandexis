@@ -323,23 +323,23 @@ class MetaWhatsAppService:
         """
         to_phone = message.recipient_phone.replace("+", "")
         
-        # 1. Interactive Button Card (routes if buttons are present or type is INTERACTIVE_BUTTON)
-        if (message.message_type == MessageType.INTERACTIVE_BUTTON or message.buttons) and message.buttons:
-            return await self.send_interactive_buttons(
-                to=to_phone,
-                body_text=message.interactive_body or message.text_content or "Please confirm:",
-                buttons=message.buttons,
-                header_text=message.interactive_header,
-                footer_text=message.interactive_footer,
-            )
-
-        # 2. Interactive List Card (e.g. 10 Indian Languages picker)
-        elif (message.message_type == MessageType.INTERACTIVE_LIST or message.list_sections) and message.list_sections:
+        # 1. Interactive List Card takes top precedence when list_sections is present (e.g. 10 Indian Languages picker)
+        if (message.message_type == MessageType.INTERACTIVE_LIST or message.list_sections) and message.list_sections:
             return await self.send_interactive_list(
                 to=to_phone,
                 body_text=message.interactive_body or message.text_content or "Please select an option:",
                 button_text=message.list_button_text or "Select Option 🔽",
                 sections=message.list_sections,
+                header_text=message.interactive_header,
+                footer_text=message.interactive_footer,
+            )
+
+        # 2. Interactive Button Card (routes if buttons are present or type is INTERACTIVE_BUTTON)
+        elif (message.message_type == MessageType.INTERACTIVE_BUTTON or message.buttons) and message.buttons:
+            return await self.send_interactive_buttons(
+                to=to_phone,
+                body_text=message.interactive_body or message.text_content or "Please confirm:",
+                buttons=message.buttons,
                 header_text=message.interactive_header,
                 footer_text=message.interactive_footer,
             )

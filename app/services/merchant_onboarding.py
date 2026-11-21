@@ -317,6 +317,38 @@ class MerchantOnboardingService:
             text_content=text,
         )
 
+    def _build_missing_business_name_prompt(self, session: OnboardingSession) -> OutboundMessage:
+        lang = session.preferred_language
+        if lang == "ta":
+            text = (
+                "🎙️ உங்கள் பதிவு பெறப்பட்டது, ஆனால் வணிகம்/கடையின் பெயர் தெளிவாகத் தெரியவில்லை.\n\n"
+                "தயவுசெய்து உங்கள் கடையின் பெயரை மட்டும் குரல் குறிப்பு அல்லது செய்தியாக அனுப்பவும்:\n"
+                "உதா: 'என் கடையின் பெயர் ஸ்ரீ பாலாஜி டெக்ஸ்டைல்ஸ்'."
+            )
+        elif lang == "te":
+            text = (
+                "🎙️ మీ సందేశం అందింది, కానీ దుకాణం పేరు స్పష్టంగా అర్థం కాలేదు.\n\n"
+                "దయచేసి మీ షాపు లేదా వ్యాపార సంస్థ పేరును వాయిస్ లేదా టెక్స్ట్ ద్వారా చెప్పండి:\n"
+                "ఉదా: 'నా షాపు పేరు శ్రీ బాలాజీ టెక్స్‌టైల్స్'."
+            )
+        elif lang == "hi":
+            text = (
+                "🎙️ आपका संदेश मिल गया है, लेकिन दुकान का नाम स्पष्ट नहीं हो सका।\n\n"
+                "कृपया अपनी दुकान या व्यापार का नाम बोलकर या लिखकर भेजें:\n"
+                "उदा: 'मेरी दुकान का नाम श्री बालाजी टेक्सटाइल्स'."
+            )
+        else:
+            text = (
+                "🎙️ Message received, but we couldn't catch the business name clearly.\n\n"
+                "Please reply with just your shop, firm, or business name:\n"
+                "Example: 'My shop name is Sri Balaji Textiles'."
+            )
+        return OutboundMessage(
+            recipient_phone=session.phone,
+            message_type=MessageType.TEXT,
+            text_content=text,
+        )
+
     # =========================================================================
     # Multi-Modal MSME Intake & Validation
     # =========================================================================
@@ -324,6 +356,7 @@ class MerchantOnboardingService:
     async def _extract_from_audio(self, media_bytes: bytes, lang: str = "te") -> Dict[str, Any]:
         """
         Transcribes and extracts MSME onboarding details from vernacular voice notes using Gemini.
+        Auto-detects spoken language (e.g. ta, te, hi, kn, en).
         """
         try:
             from app.utils.client import get_genai_client
@@ -331,19 +364,19 @@ class MerchantOnboardingService:
             client = get_genai_client()
             prompt = (
                 "You are an MSME onboarding specialist for Indian merchants.\n"
-                "The user is speaking in an Indian language (Telugu, Hindi, Tamil, English, or Telugish/Hinglish).\n"
+                "The user is speaking in an Indian language (Telugu, Hindi, Tamil, Kannada, Gujarati, Marathi, Bengali, Malayalam, Punjabi, or English).\n"
                 "Listen to the audio note and extract the following JSON fields:\n"
-                "- business_name: Name of the shop / firm / business (e.g. Sri Lakshmi Handlooms)\n"
-                "- owner_name: Name of the owner / proprietor\n"
-                "- address: City, town, district, or state (e.g. Guntur, Dharmavaram, Surat)\n"
+                "- detected_language: 2-letter language code of the spoken audio ('ta', 'te', 'hi', 'kn', 'gu', 'mr', 'bn', 'ml', 'pa', 'en')\n"
+                "- business_name: Exact name of the shop / firm / business spoken\n"
+                "- owner_name: Name of the owner / proprietor if spoken\n"
+                "- address: City, town, district, or state if spoken\n"
                 "- gstin: 15-character GSTIN if spoken\n"
                 "- udyam_reg_no: Udyam Registration Number if spoken\n"
                 "- pincode: 6-digit postal code if spoken\n"
                 "- upi_vpa: UPI ID if spoken\n\n"
                 "CRITICAL INSTRUCTIONS:\n"
-                "1. If the user mentions a city or town like Guntur, extract address='Guntur, Andhra Pradesh'.\n"
-                "2. If a shop name is clearly stated (e.g. 'మా షాపు పేరు...', 'hamari dukaan...'), extract it in business_name.\n"
-                "3. If any field is not mentioned, set it to null. NEVER make up or guess details.\n"
+                "1. If any field is not clearly spoken, set it to null. NEVER make up, invent, or guess details.\n"
+                "2. Accurately detect the spoken language in detected_language.\n"
                 "Return JSON only."
             )
             res = client.models.generate_content(
@@ -365,15 +398,53 @@ class MerchantOnboardingService:
             if isinstance(data, dict):
                 return data
         except Exception as e:
-            logger.warning("Gemini audio extraction fallback triggered (%s)", e)
+            logger.warning("Gemini audio extraction failed (%s)", e)
 
-        # Fallback for offline tests or when audio matches sample Telugu greeting
-        return {
-            "business_name": "Sri Lakshmi Handlooms",
-            "owner_name": "Ramesh",
-            "address": "Guntur, Andhra Pradesh",
-            "pincode": "522001",
-        }
+        return {}
+
+    async def _extract_from_image(self, media_bytes: bytes, mime_type: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Extracts MSME details from an uploaded visiting card, GST cert, or Udyam cert photo using Gemini multimodal.
+        """
+        try:
+            from app.utils.client import get_genai_client
+            from google.genai import types
+            client = get_genai_client()
+            mime = (mime_type or "image/jpeg").split(";")[0].strip().lower()
+            prompt = (
+                "You are an MSME document reader for Indian business onboarding.\n"
+                "Extract the following business fields in JSON from this image (Visiting Card, GSTIN Certificate, or Udyam Certificate):\n"
+                "- business_name: Business / Shop / Firm name\n"
+                "- owner_name: Name of owner / proprietor\n"
+                "- gstin: 15-character Indian GSTIN\n"
+                "- udyam_reg_no: Udyam registration number\n"
+                "- address: City, town, state, or full address\n"
+                "- pincode: 6-digit postal code\n"
+                "- upi_vpa: UPI VPA / QR payment ID\n"
+                "Set unstated fields to null. Return JSON only."
+            )
+            res = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    types.Part.from_bytes(data=media_bytes, mime_type=mime),
+                    prompt,
+                ],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1,
+                ),
+            )
+            raw = (res.text or "").strip()
+            if raw.startswith("```"):
+                raw = re.sub(r"^```[a-z]*\n?", "", raw)
+                raw = re.sub(r"\n?```$", "", raw)
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            logger.warning("Gemini image OCR extraction failed (%s)", e)
+
+        return {}
 
     async def _process_msme_intake(
         self,
@@ -412,18 +483,16 @@ class MerchantOnboardingService:
         # 3. Audio Voice Note
         if not extracted and message.message_type == MessageType.AUDIO and media_bytes:
             extracted = await self._extract_from_audio(media_bytes, session.preferred_language)
+            if extracted.get("detected_language"):
+                det_lang = str(extracted["detected_language"]).lower().strip()
+                if det_lang in SUPPORTED_LANGUAGES:
+                    session.preferred_language = det_lang
+                    session.script_preference = SUPPORTED_LANGUAGES[det_lang].get("default_script", "Latin")
 
         # 4. Media (OCR for Images/Documents)
         if not extracted and message.message_type in (MessageType.IMAGE, MessageType.DOCUMENT):
-            extracted = {
-                "business_name": "Sri Lakshmi Handlooms",
-                "owner_name": "Ramesh Kumar",
-                "udyam_reg_no": "UDYAM-TS-04-0019284",
-                "gstin": "36AAACB1234M1Z2",
-                "address": "Dharmavaram, Andhra Pradesh",
-                "pincode": "515671",
-                "upi_vpa": "srilakshmi@upi",
-            }
+            if media_bytes:
+                extracted = await self._extract_from_image(media_bytes, message.media_mime_type)
 
         # Apply extracted fields to session (preserving previously collected fields if not in new extraction)
         if extracted.get("business_name"):
@@ -442,6 +511,11 @@ class MerchantOnboardingService:
             session.pincode = extracted["pincode"].strip()
         if extracted.get("upi_vpa"):
             session.upi_vpa = extracted["upi_vpa"].strip()
+
+        # If business name could not be identified, politely prompt for it in vernacular
+        if not session.business_name:
+            session.step = OnboardingStep.AWAITING_MSME_DETAILS
+            return self._build_missing_business_name_prompt(session)
 
         # Deterministic Validation
         validation_errors = []

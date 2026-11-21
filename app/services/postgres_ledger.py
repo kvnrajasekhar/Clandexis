@@ -283,9 +283,28 @@ def _catalog(conn, merchant_id, plan):
     products = {str(r["id"]): {**r, "item_name": r["product_name"]} for r in rows}
     resolved = {}
     for line in plan.lines:
-        key = rules._resolve_one(
-            line.item_name, products, ("item_name", "aliases", "sku_code"), "product"
-        )
+        try:
+            key = rules._resolve_one(
+                line.item_name, products, ("item_name", "aliases", "sku_code"), "product"
+            )
+        except rules._Hold as h:
+            # Dynamic SKU auto-creation when explicit line pricing is present
+            if "not auto-creating" in str(h) and line.unit_price and line.unit_price > 0:
+                import re
+                base_code = re.sub(r"[^A-Za-z0-9]+", "-", line.item_name).strip("-").upper() or "ITEM"
+                sku_code = f"SKU-{base_code[:30]}"
+                new_row = conn.execute(
+                    """INSERT INTO products
+                    (merchant_id, sku_code, product_name, unit, default_unit_price, is_active)
+                    VALUES (%s, %s, %s, %s, %s, true)
+                    ON CONFLICT (merchant_id, sku_code) DO UPDATE SET is_active=true RETURNING *""",
+                    (merchant_id, sku_code, line.item_name, line.unit or "pieces", line.unit_price),
+                ).fetchone()
+                key = str(new_row["id"])
+                products[key] = {**new_row, "item_name": new_row["product_name"]}
+            else:
+                raise
+
         if line.unit and rules._unit_key(line.unit) != rules._unit_key(
             products[key]["unit"]
         ):
@@ -298,10 +317,24 @@ def _catalog(conn, merchant_id, plan):
             (merchant_id,),
         ).fetchall()
         parties = {str(r["id"]): r for r in rows}
-        pid = rules._resolve_one(
-            plan.party_name, parties, ("display_name", "aliases"), "customer"
-        )
-        party = parties[pid]
+        try:
+            pid = rules._resolve_one(
+                plan.party_name, parties, ("display_name", "aliases"), "customer"
+            )
+            party = parties[pid]
+        except rules._Hold as h:
+            if "not auto-creating" in str(h):
+                # Dynamic customer/party auto-creation
+                new_party = conn.execute(
+                    """INSERT INTO parties
+                    (merchant_id, display_name, party_type)
+                    VALUES (%s, %s, 'CUSTOMER')
+                    RETURNING *""",
+                    (merchant_id, plan.party_name),
+                ).fetchone()
+                party = new_party
+            else:
+                raise
     return resolved, party
 
 
@@ -397,8 +430,9 @@ def _confirm_and_commit(
             pid = str(products[line.item_name]["id"])
             delta = -line.quantity if plan.kind == "sale" else line.quantity
             deltas[pid] = deltas.get(pid, Decimal(0)) + delta
-        if any(levels[pid] + delta < 0 for pid, delta in deltas.items()):
-            raise rules.HeldForReviewError(["Insufficient stock"])
+        if merchant.get("stock_policy") != "WARN_ALLOW":
+            if any(levels.get(pid, Decimal(0)) + delta < 0 for pid, delta in deltas.items()):
+                raise rules.HeldForReviewError(["Insufficient stock"])
         balance = Decimal(0)
         if party:
             balance = conn.execute(

@@ -96,10 +96,19 @@ async def test_msme_collection_via_voice_note():
         media_mime_type="audio/ogg",
     )
 
+    async def mock_extract(media_bytes, lang="te"):
+        return {
+            "business_name": "Sri Balaji Handlooms",
+            "owner_name": "Balaji",
+            "address": "Guntur, Andhra Pradesh",
+            "detected_language": "te",
+        }
+    service._extract_from_audio = mock_extract
+
     out_card = await service.handle_onboarding_message(msg_voice, media_bytes=b"sample_ogg_voice_bytes")
 
     assert session.step == OnboardingStep.AWAITING_CONFIRMATION
-    assert session.business_name == "Sri Lakshmi Handlooms"
+    assert session.business_name == "Sri Balaji Handlooms"
     assert "Guntur" in (session.business_address or "")
     assert out_card.message_type == MessageType.INTERACTIVE_BUTTON
     assert "వ్యాపార వివరాల నిర్ధారణ" in (out_card.interactive_header or "")
