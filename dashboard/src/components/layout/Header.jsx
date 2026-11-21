@@ -26,7 +26,7 @@ export default function Header({
     { id: 'demo', label: '⚡ Extractor' },
   ];
 
-  const WHATSAPP_REDIRECT_URL = "https://wa.me/919848892720";
+  const WHATSAPP_REDIRECT_URL = "https://wa.me/15551737641";
   const businessName = session?.business_name || 'My Business';
 
   return (

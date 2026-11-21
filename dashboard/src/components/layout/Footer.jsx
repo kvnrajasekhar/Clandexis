@@ -9,7 +9,7 @@ export default function Footer() {
         </div>
         <div className="flex items-center gap-3 text-[11px]">
           <a
-            href="https://wa.me/919848892720"
+            href="https://wa.me/15551737641"
             target="_blank"
             rel="noopener noreferrer"
             className="text-[#25D366] hover:underline font-medium"
