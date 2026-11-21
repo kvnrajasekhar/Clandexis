@@ -26,7 +26,8 @@ export default function Header({
     { id: 'demo', label: '⚡ Extractor' },
   ];
 
-  const WHATSAPP_REDIRECT_URL = "https://wa.me/15551737641";
+  const WHATSAPP_REDIRECT_URL = "https://wa.me/919848892720";
+  const WHATSAPP_DISPLAY_NUMBER = "+91 98488 92720";
   const businessName = session?.business_name || 'My Business';
 
   return (
@@ -70,12 +71,12 @@ export default function Header({
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#20bd5a] text-slate-950 font-bold text-xs shadow-md shadow-[#25D366]/20 transition shrink-0"
-            title={`Chat directly on WhatsApp with ${businessName}`}
+            title={`Chat directly on WhatsApp (${WHATSAPP_DISPLAY_NUMBER})`}
           >
             <WhatsAppIcon className="w-4 h-4 fill-slate-950 shrink-0" />
             <span>WhatsApp</span>
-            <span className="hidden sm:inline text-[11px] font-medium text-slate-900 max-w-[140px] truncate">
-              • {businessName}
+            <span className="hidden sm:inline text-[11px] font-medium text-slate-900">
+              • {WHATSAPP_DISPLAY_NUMBER}
             </span>
           </a>
 

@@ -9,12 +9,12 @@ export default function Footer() {
         </div>
         <div className="flex items-center gap-3 text-[11px]">
           <a
-            href="https://wa.me/15551737641"
+            href="https://wa.me/919848892720"
             target="_blank"
             rel="noopener noreferrer"
             className="text-[#25D366] hover:underline font-medium"
           >
-            Chat with Clandexis ERP on WhatsApp
+            WhatsApp Support: +91 98488 92720
           </a>
           <span>•</span>
           <span className="font-mono text-slate-400">asia-south1</span>

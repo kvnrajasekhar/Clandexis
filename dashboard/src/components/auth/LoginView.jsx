@@ -57,13 +57,13 @@ export default function LoginView({
         {/* WhatsApp Direct Chat Link Button */}
         <div className="pt-1">
           <a
-            href="https://wa.me/15551737641"
+            href="https://wa.me/919848892720"
             target="_blank"
             rel="noopener noreferrer"
             className="w-full flex items-center justify-center gap-2 bg-[#25D366] hover:bg-[#20bd5a] text-slate-950 font-bold py-2.5 px-4 rounded-xl text-xs shadow-md transition"
           >
             <WhatsAppIcon className="w-4 h-4 fill-slate-950" />
-            <span>Chat with Clandexis WhatsApp ERP</span>
+            <span>Chat with WhatsApp ERP (+91 98488 92720)</span>
           </a>
         </div>
 

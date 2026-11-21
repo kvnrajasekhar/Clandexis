@@ -83,7 +83,7 @@ class Settings(BaseModel):
     # Meta WhatsApp Business Cloud API (Graph API v21.0)
     # ==========================================================================
     WHATSAPP_BOT_NUMBER: str = Field(
-        default_factory=lambda: os.getenv("WHATSAPP_BOT_NUMBER", "15551737641")
+        default_factory=lambda: os.getenv("WHATSAPP_BOT_NUMBER", "919848892720")
     )
     META_WHATSAPP_TOKEN: Optional[str] = Field(
         default_factory=lambda: _meta_val("META_WHATSAPP_TOKEN", "WHATSAPP_ACCESS_TOKEN")
@@ -155,7 +155,7 @@ class Settings(BaseModel):
     @property
     def whatsapp_chat_url(self) -> str:
         clean_num = "".join(ch for ch in str(self.WHATSAPP_BOT_NUMBER) if ch.isdigit())
-        return f"https://wa.me/{clean_num or '15551737641'}"
+        return f"https://wa.me/{clean_num or '919848892720'}"
 
     @property
     def meta_messages_endpoint(self) -> str:
