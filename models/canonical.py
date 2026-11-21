@@ -71,6 +71,7 @@ class InboundMessage(BaseModel):
     
     # Traceability
     raw_payload: Dict[str, Any] = Field(default_factory=dict, description="Raw original webhook dictionary")
+    recipient_phone_id: Optional[str] = Field(None, description="Meta phone number ID the message was sent to")
 
     model_config = ConfigDict(extra="ignore")
 
@@ -102,6 +103,7 @@ class OutboundMessage(BaseModel):
     document_filename: Optional[str] = None
     audio_url: Optional[str] = None
     image_url: Optional[str] = None
+    sender_phone_id: Optional[str] = Field(None, description="Meta phone number ID to send message from")
 
     model_config = ConfigDict(extra="ignore")
 

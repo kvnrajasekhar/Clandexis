@@ -51,6 +51,19 @@ class MetaWhatsAppService:
         self.graph_base_url = settings.META_GRAPH_BASE_URL
         self.http_client = httpx.AsyncClient(timeout=30.0)
 
+        # Collect and recognize all allowed phone number IDs
+        self.allowed_phone_number_ids = set()
+        if self.phone_number_id:
+            for pid in str(self.phone_number_id).replace(",", " ").split():
+                if pid.strip():
+                    self.allowed_phone_number_ids.add(pid.strip())
+
+        # Recognized project phone IDs (business account & test sandbox account)
+        KNOWN_PROJECT_PHONE_IDS = {"1461651120366905", "1378627142011047"}
+        # If configured with project IDs or defaults, allow both so neither is dropped
+        if not self.phone_number_id or any(pid in KNOWN_PROJECT_PHONE_IDS for pid in self.allowed_phone_number_ids):
+            self.allowed_phone_number_ids.update(KNOWN_PROJECT_PHONE_IDS)
+
     async def close(self):
         await self.http_client.aclose()
 
@@ -75,8 +88,9 @@ class MetaWhatsAppService:
                 if not value.messages:
                     # Ignore status delivery receipts or empty message batches
                     continue
-                if self.phone_number_id and value.metadata.phone_number_id and value.metadata.phone_number_id != self.phone_number_id:
-                    logger.warning("Dropped message for mismatched phone_number_id: %s != %s", value.metadata.phone_number_id, self.phone_number_id)
+                incoming_pid = value.metadata.phone_number_id
+                if self.allowed_phone_number_ids and incoming_pid and incoming_pid not in self.allowed_phone_number_ids:
+                    logger.warning("Dropped message for mismatched phone_number_id: %s not in %s", incoming_pid, self.allowed_phone_number_ids)
                     continue
 
                 contact_map = {c.wa_id: (c.profile.name if c.profile else None) for c in value.contacts or []}
@@ -102,6 +116,7 @@ class MetaWhatsAppService:
                         tenant_id=tenant_id,
                         sender_phone=sender_phone,
                         sender_name=sender_name,
+                        recipient_phone_id=incoming_pid,
                         raw_payload={"object": raw_data.get("object"), "entry": [{
                             "id": entry.id, "changes": [{"field": change.field, "value": {
                                 "metadata": value.metadata.model_dump(mode="json"),
@@ -129,7 +144,8 @@ class MetaWhatsAppService:
                 value = change.value
                 if not value.messages:
                     continue
-                if self.phone_number_id and value.metadata.phone_number_id and value.metadata.phone_number_id != self.phone_number_id:
+                incoming_pid = value.metadata.phone_number_id
+                if self.allowed_phone_number_ids and incoming_pid and incoming_pid not in self.allowed_phone_number_ids:
                     continue
 
                 for msg in value.messages:
@@ -165,7 +181,8 @@ class MetaWhatsAppService:
                 value = change.value
                 if not value.messages:
                     continue
-                if self.phone_number_id and value.metadata.phone_number_id and value.metadata.phone_number_id != self.phone_number_id:
+                incoming_pid = value.metadata.phone_number_id
+                if self.allowed_phone_number_ids and incoming_pid and incoming_pid not in self.allowed_phone_number_ids:
                     continue
 
                 contact_map = {c.wa_id: (c.profile.name if c.profile else None) for c in value.contacts or []}
@@ -191,6 +208,7 @@ class MetaWhatsAppService:
                         tenant_id=sender_phone,
                         sender_phone=sender_phone,
                         sender_name=sender_name,
+                        recipient_phone_id=incoming_pid,
                         raw_payload={"object": raw_data.get("object"), "entry": [{
                             "id": entry.id, "changes": [{"field": change.field, "value": {
                                 "metadata": value.metadata.model_dump(mode="json"),
@@ -210,6 +228,7 @@ class MetaWhatsAppService:
         sender_phone: str,
         sender_name: Optional[str],
         raw_payload: Dict[str, Any],
+        recipient_phone_id: Optional[str] = None,
     ) -> Optional[InboundMessage]:
         """
         Converts single MetaMessage into normalized InboundMessage.
@@ -269,6 +288,7 @@ class MetaWhatsAppService:
             interactive_id=interactive_id,
             interactive_title=interactive_title,
             raw_payload=raw_payload,
+            recipient_phone_id=recipient_phone_id,
         )
 
     # ==========================================================================
@@ -317,10 +337,11 @@ class MetaWhatsAppService:
     # Outbound Dispatching
     # ==========================================================================
 
-    async def dispatch_outbound(self, message: OutboundMessage) -> Optional[MetaSendResponse]:
+    async def dispatch_outbound(self, message: OutboundMessage, phone_number_id: Optional[str] = None) -> Optional[MetaSendResponse]:
         """
         Dispatches a canonical OutboundMessage through Meta WhatsApp Cloud API.
         """
+        target_pid = phone_number_id or getattr(message, "sender_phone_id", None) or self.phone_number_id
         to_phone = message.recipient_phone.replace("+", "")
         
         # 1. Interactive List Card takes top precedence when list_sections is present (e.g. 10 Indian Languages picker)
@@ -332,6 +353,7 @@ class MetaWhatsAppService:
                 sections=message.list_sections,
                 header_text=message.interactive_header,
                 footer_text=message.interactive_footer,
+                phone_number_id=target_pid,
             )
 
         # 2. Interactive Button Card (routes if buttons are present or type is INTERACTIVE_BUTTON)
@@ -342,6 +364,7 @@ class MetaWhatsAppService:
                 buttons=message.buttons,
                 header_text=message.interactive_header,
                 footer_text=message.interactive_footer,
+                phone_number_id=target_pid,
             )
             
         elif message.message_type == MessageType.DOCUMENT and message.document_url:
@@ -350,21 +373,27 @@ class MetaWhatsAppService:
                 document_url=message.document_url,
                 filename=message.document_filename or "invoice.pdf",
                 caption=message.text_content,
+                phone_number_id=target_pid,
             )
             
         elif message.message_type == MessageType.AUDIO and message.audio_url:
             return await self.send_audio_message(
                 to=to_phone,
                 audio_url=message.audio_url,
+                phone_number_id=target_pid,
             )
 
         elif message.text_content or message.interactive_body:
-            return await self.send_text_message(to_phone, message.text_content or message.interactive_body or "")
+            return await self.send_text_message(
+                to_phone,
+                message.text_content or message.interactive_body or "",
+                phone_number_id=target_pid,
+            )
 
         logger.warning(f"Unsupported outbound message format: {message.message_type}")
         return None
 
-    async def send_text_message(self, to: str, text: str) -> Optional[MetaSendResponse]:
+    async def send_text_message(self, to: str, text: str, phone_number_id: Optional[str] = None) -> Optional[MetaSendResponse]:
         """
         Sends formatted text message.
         """
@@ -375,7 +404,7 @@ class MetaWhatsAppService:
             type=MetaMessageType.TEXT,
             text=MetaTextPayload(body=text),
         )
-        return await self._post_message(payload)
+        return await self._post_message(payload, phone_number_id=phone_number_id)
 
     async def send_interactive_buttons(
         self,
@@ -384,6 +413,7 @@ class MetaWhatsAppService:
         buttons: List[CanonicalButton],
         header_text: Optional[str] = None,
         footer_text: Optional[str] = "Clandexis Invisible ERP",
+        phone_number_id: Optional[str] = None,
     ) -> Optional[MetaSendResponse]:
         """
         Sends 1-tap interactive confirmation buttons (up to 3 buttons supported by Meta API).
@@ -410,7 +440,7 @@ class MetaWhatsAppService:
                 action=MetaInteractiveAction(buttons=meta_buttons),
             ),
         )
-        return await self._post_message(payload)
+        return await self._post_message(payload, phone_number_id=phone_number_id)
 
     async def send_interactive_list(
         self,
@@ -420,6 +450,7 @@ class MetaWhatsAppService:
         sections: List[CanonicalListSection],
         header_text: Optional[str] = None,
         footer_text: Optional[str] = "Clandexis Invisible ERP",
+        phone_number_id: Optional[str] = None,
     ) -> Optional[MetaSendResponse]:
         """
         Sends native WhatsApp Interactive List (supports up to 10 rows across sections).
@@ -462,7 +493,7 @@ class MetaWhatsAppService:
                 ),
             ),
         )
-        return await self._post_message(payload)
+        return await self._post_message(payload, phone_number_id=phone_number_id)
 
     async def send_document_message(
         self,
@@ -470,6 +501,7 @@ class MetaWhatsAppService:
         document_url: str,
         filename: str = "invoice.pdf",
         caption: Optional[str] = None,
+        phone_number_id: Optional[str] = None,
     ) -> Optional[MetaSendResponse]:
         """
         Sends PDF invoices or cryptographically attested credit reports.
@@ -485,9 +517,9 @@ class MetaWhatsAppService:
                 caption=caption,
             ),
         )
-        return await self._post_message(payload)
+        return await self._post_message(payload, phone_number_id=phone_number_id)
 
-    async def send_audio_message(self, to: str, audio_url: str) -> Optional[MetaSendResponse]:
+    async def send_audio_message(self, to: str, audio_url: str, phone_number_id: Optional[str] = None) -> Optional[MetaSendResponse]:
         """
         Sends Gemini TTS synthesized voice readback.
         """
@@ -498,13 +530,14 @@ class MetaWhatsAppService:
             type=MetaMessageType.AUDIO,
             audio=MetaMediaPayload(link=audio_url),
         )
-        return await self._post_message(payload)
+        return await self._post_message(payload, phone_number_id=phone_number_id)
 
-    async def mark_message_as_read(self, message_id: str) -> bool:
+    async def mark_message_as_read(self, message_id: str, phone_number_id: Optional[str] = None) -> bool:
         """
         Sends read status receipt to turn tick marks blue on WhatsApp.
         """
-        endpoint = f"{self.graph_base_url}/{self.api_version}/{self.phone_number_id}/messages"
+        pid = phone_number_id or self.phone_number_id or "1461651120366905"
+        endpoint = f"{self.graph_base_url}/{self.api_version}/{pid}/messages"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
@@ -521,11 +554,12 @@ class MetaWhatsAppService:
             logger.warning("Read receipt failed (%s)", type(e).__name__)
             return False
 
-    async def _post_message(self, payload: MetaSendMessageRequest) -> Optional[MetaSendResponse]:
+    async def _post_message(self, payload: MetaSendMessageRequest, phone_number_id: Optional[str] = None) -> Optional[MetaSendResponse]:
         """
         Internal POST call to Meta Graph API messages endpoint.
         """
-        endpoint = f"{self.graph_base_url}/{self.api_version}/{self.phone_number_id}/messages"
+        pid = phone_number_id or self.phone_number_id or "1461651120366905"
+        endpoint = f"{self.graph_base_url}/{self.api_version}/{pid}/messages"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",

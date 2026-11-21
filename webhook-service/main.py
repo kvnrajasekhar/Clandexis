@@ -183,7 +183,9 @@ async def process_onboarding_message(message: InboundMessage):
                 media_bytes = await meta_service.download_media_bytes(message.media_id)
         outbound = await service.handle_onboarding_message(message, media_bytes=media_bytes)
         if meta_service and outbound:
-            await meta_service.dispatch_outbound(outbound)
+            if message.recipient_phone_id:
+                outbound.sender_phone_id = message.recipient_phone_id
+            await meta_service.dispatch_outbound(outbound, phone_number_id=message.recipient_phone_id)
     except Exception as e:
         logger.error(f"Onboarding flow failed for {message.sender_phone}: {e}", exc_info=True)
 
@@ -219,11 +221,14 @@ async def process_inbound_message(message: InboundMessage):
             if document["status"] != "NOT_APPLICABLE":
                 outbound.text_content += f"\nInvoice status: {document['status']}"
         if meta_service:
-            await meta_service.dispatch_outbound(outbound)
+            if message.recipient_phone_id:
+                outbound.sender_phone_id = message.recipient_phone_id
+            await meta_service.dispatch_outbound(outbound, phone_number_id=message.recipient_phone_id)
             if document and document.get("document_url"):
                 await meta_service.dispatch_outbound(OutboundMessage(
                     recipient_phone=message.sender_phone, message_type=MessageType.DOCUMENT,
-                    document_url=document["document_url"], document_filename=document["filename"]))
+                    document_url=document["document_url"], document_filename=document["filename"],
+                    sender_phone_id=message.recipient_phone_id), phone_number_id=message.recipient_phone_id)
     except Exception as e:
         logger.error("Inbound processing failed (%s)", type(e).__name__)
 
