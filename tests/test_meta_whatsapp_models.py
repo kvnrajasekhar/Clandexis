@@ -184,6 +184,47 @@ def test_meta_webhook_interactive_button_click(mapped_service):
     assert msg.interactive_title == "✅ Confirm & Bill"
 
 
+def test_registered_onboarding_button_uses_onboarding_route(mapped_service):
+    raw_payload = {
+        "object": "whatsapp_business_account",
+        "entry": [{
+            "id": "WABA_ID_12345",
+            "changes": [{
+                "value": {
+                    "messaging_product": "whatsapp",
+                    "metadata": {
+                        "display_phone_number": "15550269999",
+                        "phone_number_id": "PHONE_NUM_ID_6789",
+                    },
+                    "messages": [{
+                        "from": "919876543210",
+                        "id": "wamid.STALE_ONBOARDING_EDIT",
+                        "timestamp": "1732080000",
+                        "type": "interactive",
+                        "interactive": {
+                            "type": "button_reply",
+                            "button_reply": {
+                                "id": "MSME_ONBOARD_EDIT_0123456789abcdef",
+                                "title": "Edit Details",
+                            },
+                        },
+                    }],
+                },
+                "field": "messages",
+            }],
+        }],
+    }
+
+    assert mapped_service.parse_webhook_payload(raw_payload) == []
+    messages = mapped_service.parse_unregistered_inbound_messages(
+        raw_payload,
+        include_registered_onboarding_actions=True,
+    )
+    assert len(messages) == 1
+    assert messages[0].tenant_id == "textile-demo"
+    assert messages[0].interactive_id == "MSME_ONBOARD_EDIT_0123456789abcdef"
+
+
 def test_meta_webhook_unregistered_sender_extraction(mapped_service):
     raw_payload = {
         "object": "whatsapp_business_account",
@@ -230,7 +271,7 @@ async def test_meta_dispatch_interactive_card(monkeypatch):
     service = MetaWhatsAppService(token="fake_token", phone_number_id="123456")
     captured_payload = None
 
-    async def mock_post(payload):
+    async def mock_post(payload, phone_number_id=None):
         nonlocal captured_payload
         captured_payload = payload
         return None
