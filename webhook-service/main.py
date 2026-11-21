@@ -152,16 +152,18 @@ async def handle_meta_webhook(
             logger.error(f"Failed to process message {msg.message_id}: {e}", exc_info=True)
 
     # 3. Handle unregistered senders via dynamic WhatsApp onboarding workflow
-    unregistered_messages = meta_service.parse_unregistered_inbound_messages(raw_json)
-    for unreg_msg in unregistered_messages:
-        logger.info(
-            f"Received Onboarding InboundMessage: id={unreg_msg.message_id}, type={unreg_msg.message_type}, "
-            f"sender={unreg_msg.sender_phone}, interactive_id={unreg_msg.interactive_id}"
-        )
-        try:
-            await process_onboarding_message(unreg_msg)
-        except Exception as e:
-            logger.error(f"Failed to process onboarding message {unreg_msg.message_id}: {e}", exc_info=True)
+    unregistered_messages = []
+    if settings.ENABLE_WHATSAPP_ONBOARDING:
+        unregistered_messages = meta_service.parse_unregistered_inbound_messages(raw_json)
+        for unreg_msg in unregistered_messages:
+            logger.info(
+                f"Received Onboarding InboundMessage: id={unreg_msg.message_id}, type={unreg_msg.message_type}, "
+                f"sender={unreg_msg.sender_phone}, interactive_id={unreg_msg.interactive_id}"
+            )
+            try:
+                await process_onboarding_message(unreg_msg)
+            except Exception as e:
+                logger.error(f"Failed to process onboarding message {unreg_msg.message_id}: {e}", exc_info=True)
 
     total_received = len(inbound_messages) + len(unregistered_messages)
     return {"status": "ok", "messages_received": total_received}

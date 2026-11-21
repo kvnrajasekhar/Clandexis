@@ -144,6 +144,9 @@ class Settings(BaseModel):
     DASHBOARD_DEMO_MERCHANT_ID: str = Field(default_factory=lambda: os.getenv("DASHBOARD_DEMO_MERCHANT_ID", ""))
     INTERNAL_SEND_TOKEN: str = Field(default_factory=lambda: get_secret("INTERNAL_SEND_TOKEN", ""))
     INVOICE_LOCAL_ROOT: Optional[str] = Field(default_factory=lambda: os.getenv("INVOICE_LOCAL_ROOT"))
+    ENABLE_WHATSAPP_ONBOARDING: bool = Field(
+        default_factory=lambda: os.getenv("ENABLE_WHATSAPP_ONBOARDING", "false").lower() == "true"
+    )
 
     @property
     def is_production(self) -> bool:
