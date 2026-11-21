@@ -184,6 +184,22 @@ def candidate_summary(candidate, candidate_id: str, language: str, script: str,
                       *, review: bool = False) -> str:
     labels = copy_for(language, script)
     symbol = _currency(candidate.currency)
+    t_type = getattr(candidate, "transaction_type", None)
+    if str(t_type).lower() in ("stock_added", "transactiontype.stock_added"):
+        lines = ["📦 *Inventory Stock In*"]
+        for item in candidate.items:
+            unit_str = f" {item.unit}" if item.unit else ""
+            lines.append(f"• {item.item_name}: {_amount(item.quantity)}{unit_str}")
+        lines.extend([
+            f"{labels['candidate']}: {candidate_id}",
+            labels["pending"],
+        ])
+        if review:
+            lines.append(labels["review"])
+        else:
+            lines.append(labels["question"])
+        return "\n".join(lines)
+
     lines = [f"*{labels['confirm_heading']}*", f"{labels['party']}: {candidate.buyer_name or '—'}"]
     for item in candidate.items:
         line = f"• {item.item_name}: {_amount(item.quantity)}"

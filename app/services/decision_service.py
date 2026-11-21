@@ -84,6 +84,10 @@ class DecisionService:
                                 "new_purchase": (
                                     "Reporting stock received, goods bought, or a purchase from a supplier."
                                 ),
+                                "stock_added": (
+                                    "Reporting initial inventory, opening stock, production log, or adding items to inventory "
+                                    "(e.g. 'I have 100 chocolate boxes in my inventory', 'Added 50 boxes to stock', 'Opening inventory', 'సరుకు ఉంది', 'స్టాక్ చేర్చాను')."
+                                ),
                                 "general_greeting": (
                                     "Greeting, hello, or help inquiry (e.g. 'Hi', 'Hello', 'Help', 'నమస్కారం')."
                                 ),
@@ -117,6 +121,8 @@ class DecisionService:
             return {"intent": "new_sale", "confidence": 0.92, "probabilities": {}}
         if re.search(r"\b(bought|purchase|khareed|stock in|saraku)\b|కొన్నాను|खरीद|வாங்கிய", lower, re.I):
             return {"intent": "new_purchase", "confidence": 0.90, "probabilities": {}}
+        if re.search(r"\b(inventory|stock|maal|saraku|boxes|bottles|packets|pieces)\b.*\b(have|add|added|in my|opening)\b|\b(have|got|added|opening)\b.*\b(inventory|stock|boxes|packets)\b|స్టాక్|సరుకు|ఇన్వెంటరీ", lower, re.I):
+            return {"intent": "stock_added", "confidence": 0.95, "probabilities": {}}
 
         return {"intent": "clarify_field" if has_active_candidate else "general_greeting", "confidence": 0.70, "probabilities": {}}
 

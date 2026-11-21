@@ -211,8 +211,9 @@ def confirmation_holds(merchant_id, candidate_id, *, db=None, now=None):
             if plan.kind != "sale":
                 continue
             product_id = str(products[line.item_name]["id"])
-            if levels.get(product_id, Decimal(0)) - line.quantity < 0:
-                return ["Insufficient stock"]
+            if merchant.get("stock_policy") != "WARN_ALLOW":
+                if levels.get(product_id, Decimal(0)) - line.quantity < 0:
+                    return ["Insufficient stock"]
         return []
 
 

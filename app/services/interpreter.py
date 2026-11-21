@@ -57,6 +57,11 @@ RULES:
 13. Return JSON only, following the response schema.
 14. Never claim a transaction has been committed.
 15. If input contains audio, provide a clean verbatim transcription in raw_transcript.
+16. Stock / Inventory Input Handling:
+    - If the input reports existing stock, opening inventory, or stock added (e.g. 'I have one hundred chocolate boxes, 50 pen boxes in my inventory', 'Added 50 boxes to stock'):
+      Set transaction_type="stock_added". Extract each item with item_name, quantity, and unit.
+      Do NOT invent or require buyer, prices, or payments (leave total_amount, credit_amount, payments null as production/stock entries do not record revenue).
+      Set needs_clarification=false unless item details are ambiguous.
 
 ADDITIONAL FINANCIAL EXTRACTION RULES:
 1. payments[] contains ONLY actual reported payments (cash, upi, bank_transfer, etc.). NEVER put credit/udhaar inside payments[].
