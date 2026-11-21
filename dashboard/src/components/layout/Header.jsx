@@ -26,7 +26,8 @@ export default function Header({
     { id: 'demo', label: '⚡ Extractor' },
   ];
 
-  const WHATSAPP_REDIRECT_URL = "https://wa.me/15551737641";
+  const WHATSAPP_REDIRECT_URL = "https://wa.me/919848892720";
+  const businessName = session?.business_name || 'My Business';
 
   return (
     <header className="border-b border-slate-800 bg-slate-900/95 backdrop-blur sticky top-0 z-50 px-3 sm:px-6 py-2.5 sm:py-3.5">
@@ -69,11 +70,13 @@ export default function Header({
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#20bd5a] text-slate-950 font-bold text-xs shadow-md shadow-[#25D366]/20 transition shrink-0"
-            title="Chat directly on WhatsApp (+1 555 173-7641)"
+            title={`Chat directly on WhatsApp with ${businessName}`}
           >
             <WhatsAppIcon className="w-4 h-4 fill-slate-950 shrink-0" />
-            <span className="hidden xs:inline sm:inline">WhatsApp</span>
-            <span className="hidden md:inline text-[11px] font-normal text-slate-900">• +1 (555) 173-7641</span>
+            <span>WhatsApp</span>
+            <span className="hidden sm:inline text-[11px] font-medium text-slate-900 max-w-[140px] truncate">
+              • {businessName}
+            </span>
           </a>
 
           {/* Database Refresh Button */}
