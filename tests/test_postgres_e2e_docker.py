@@ -36,12 +36,21 @@ from models.canonical import (
 )
 from webhook_service.meta_whatsapp_handler import MetaWhatsAppService
 
-DOCKER_DSN = "postgresql://clandexis_app:clandexis_test_password@localhost:5433/clandexis_test_db"
+DOCKER_DSN = os.getenv(
+    "DOCKER_DATABASE_URL",
+    "postgresql://clandexis_app:clandexis_test_password@localhost:5433/clandexis_test_db",
+)
 
 
 @pytest.fixture
 def docker_db():
-    """Provides a tenant-scoped PostgresDatabase connected to the local Docker container."""
+    """Provides a tenant-scoped PostgresDatabase connected to the test database container or instance."""
+    try:
+        with psycopg.connect(DOCKER_DSN, connect_timeout=1) as conn:
+            pass
+    except Exception as exc:
+        pytest.skip(f"PostgreSQL test database not accessible at {DOCKER_DSN}: {exc}")
+
     os.environ["DATABASE_BACKEND"] = "postgres"
     os.environ["DATABASE_URL"] = DOCKER_DSN
     db = PostgresDatabase(dsn=DOCKER_DSN)
