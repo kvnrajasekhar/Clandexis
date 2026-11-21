@@ -122,8 +122,20 @@ class MerchantOnboardingService:
         session = self.get_session(phone)
         session.last_updated = datetime.now(timezone.utc)
 
-        # 1. Handle Interactive Button Clicks
+        # 0. User Reset / Restart Command
+        raw_text = (message.text_content or "").strip().lower()
         button_id = message.interactive_id or (message.text_content or "").strip()
+        if raw_text in ("reset", "/reset", "restart", "start over", "clear") or button_id in ("ONBOARD_RESET", "RESET"):
+            logger.info("Resetting onboarding session for %s by user command", phone)
+            session = OnboardingSession(phone)
+            self.sessions[phone] = session
+            lang, script = preference(message.text_content or "")
+            session.preferred_language = lang
+            session.script_preference = script
+            session.step = OnboardingStep.AWAITING_LANGUAGE
+            return self._build_language_menu(session, suggested_lang=lang)
+
+        # 1. Handle Interactive Button Clicks
 
         # Step A: Language Selection
         if button_id.startswith("LANG_"):
@@ -174,6 +186,22 @@ class MerchantOnboardingService:
             return await self._process_msme_intake(session, message, media_bytes=media_bytes)
 
         if session.step == OnboardingStep.COMPLETED:
+            from app.services.whatsapp_identity import resolve_phone
+            # If PostgreSQL is configured and this phone is no longer found in merchants table,
+            # it means database data was cleared/deleted. Reset stale in-memory session.
+            if settings.DATABASE_BACKEND == "postgres" and settings.DATABASE_URL and not resolve_phone(phone):
+                logger.warning(
+                    "Phone %s has COMPLETED in-memory session but does not exist in PostgreSQL. Resetting session.",
+                    phone,
+                )
+                session = OnboardingSession(phone)
+                self.sessions[phone] = session
+                lang, script = preference(message.text_content or "")
+                session.preferred_language = lang
+                session.script_preference = script
+                session.step = OnboardingStep.AWAITING_LANGUAGE
+                return self._build_language_menu(session, suggested_lang=lang)
+
             return OutboundMessage(
                 recipient_phone=phone,
                 message_type=MessageType.TEXT,

@@ -235,3 +235,60 @@ async def test_confirmation_card_approval_completes_onboarding():
     assert session.step == OnboardingStep.COMPLETED
     assert "అభినందనలు!" in (out_final.text_content or "")
     assert "మీ మొదటి లావాదేవీని ఇప్పుడే నమోదు చేయండి" in (out_final.text_content or "")
+
+
+@pytest.mark.asyncio
+async def test_user_explicit_reset_command_restarts_onboarding():
+    service = MerchantOnboardingService(sessions={})
+    phone = "+919876500007"
+    session = service.get_session(phone)
+    session.step = OnboardingStep.COMPLETED
+    session.business_name = "Old Business"
+
+    msg_reset = InboundMessage(
+        message_id="msg_reset",
+        tenant_id=phone,
+        sender_phone=phone,
+        message_type=MessageType.TEXT,
+        text_content="reset",
+    )
+
+    out = await service.handle_onboarding_message(msg_reset)
+    fresh_session = service.get_session(phone)
+
+    assert fresh_session.step == OnboardingStep.AWAITING_LANGUAGE
+    assert out.message_type == MessageType.INTERACTIVE_LIST
+    assert "Old Business" not in (out.text_content or "")
+
+
+@pytest.mark.asyncio
+async def test_completed_session_resets_if_merchant_deleted_from_db(monkeypatch):
+    from config import settings
+    monkeypatch.setattr(settings, "DATABASE_BACKEND", "postgres")
+    monkeypatch.setattr(settings, "DATABASE_URL", "postgresql://user:pass@localhost:5432/db")
+
+    import app.services.whatsapp_identity as wi
+    monkeypatch.setattr(wi, "resolve_phone", lambda phone: None)
+
+    service = MerchantOnboardingService(sessions={})
+    phone = "+919876500008"
+    session = service.get_session(phone)
+    session.step = OnboardingStep.COMPLETED
+    session.business_name = "Sai Textiles"
+
+    # Merchant was deleted from DB, so user sends "hi" or "20shirts"
+    msg_hi = InboundMessage(
+        message_id="msg_hi_after_delete",
+        tenant_id=phone,
+        sender_phone=phone,
+        message_type=MessageType.TEXT,
+        text_content="hi",
+    )
+
+    out = await service.handle_onboarding_message(msg_hi)
+    session_after = service.get_session(phone)
+
+    # Must auto-reset instead of returning "Your business Sai Textiles is already active"
+    assert session_after.step == OnboardingStep.AWAITING_LANGUAGE
+    assert out.message_type == MessageType.INTERACTIVE_LIST
+    assert "is already active" not in (out.text_content or "")
