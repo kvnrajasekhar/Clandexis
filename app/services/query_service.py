@@ -25,7 +25,7 @@ class QueryService:
     _ACTION = re.compile(
         r"\b(sold|sell|sale|becha|bechi|ammanu|ammnu|purchase|bought|"
         r"received|repaid|paid|add|added|produce|produced|manufactured|"
-        r"banaya|banayi|record|damage|wastage)\b|అమ్మ|కొన్న|बेच|खरीद",
+        r"banaya|banayi|record|damage|wastage|have|opening|intake)\b|అమ్మ|కొన్న|ఉన్నాయి|बेच|खरीद",
         re.I,
     )
     _REPORT = re.compile(r"\b(pdf|ledgers?|reports?|statement export)\b", re.I)

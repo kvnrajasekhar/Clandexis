@@ -208,7 +208,8 @@ def orchestrate_inbound_message(
                             active_candidate_id=None, latest_question=None, missing_fields=[], candidate_revision=None, expires_at=None
                         )
                     t_desc = target.candidate.buyer_name or (target.candidate.items[0].item_name if target.candidate.items else "Transaction")
-                    reply_text = f"✅ Cancelled previous transaction ({t_desc}: ₹{target.candidate.total_amount:,.2f}). Nothing was posted to your ledger."
+                    amt_str = f": ₹{target.candidate.total_amount:,.2f}" if target.candidate.total_amount is not None else ""
+                    reply_text = f"✅ Cancelled previous transaction ({t_desc}{amt_str}). Nothing was posted to your ledger."
                     if rem:
                         reply_text += f"\n\nYou still have {len(rem)} other pending transaction(s) on hold."
                     return None, OutboundMessage(
@@ -234,13 +235,12 @@ def orchestrate_inbound_message(
                     text_content="There are no active pending transactions to confirm.",
                 )
             if "all" in raw_msg:
-                ready_cands = [
-                    c for c in active_list
-                    if not c.candidate.needs_clarification
-                    and not c.candidate.requires_review
-                    and c.candidate.validation_status == "ACCEPTED"
-                    and not c.candidate.missing_fields
-                ]
+                preflight = getattr(service.ledger, "confirmation_holds", None)
+                ready_cands = []
+                for c in active_list:
+                    c_holds = preflight(merchant.merchant_id, c.candidate_id, service.clock()) if preflight else []
+                    if not c.candidate.needs_clarification and not c_holds and not c.candidate.missing_fields:
+                        ready_cands.append(c)
                 if not ready_cands:
                     clarification = conversation.get("latest_question") or "Pending transactions require missing details or review before they can be confirmed."
                     return None, OutboundMessage(recipient_phone=message.sender_phone, text_content=clarification)
@@ -259,8 +259,9 @@ def orchestrate_inbound_message(
                     conversation.update(active_candidate_id=None, latest_question=None, missing_fields=[], candidate_revision=None, expires_at=None)
                 lines = [f"✅ *Recorded {len(results)} Transactions to Ledger:*\n━━━━━━━━━━━━━━━━━━━"]
                 for r in results:
-                    tot = r.amount_paid + r.credit_outstanding
-                    lines.append(f"• Txn #{r.transaction_id}: ₹{tot:,.2f} ({r.posting_status})")
+                    tot = (r.amount_paid or Decimal(0)) + (r.credit_outstanding or Decimal(0))
+                    desc = f"₹{tot:,.2f}" if tot > 0 else "Stock In"
+                    lines.append(f"• Txn #{r.transaction_id}: {desc} ({r.posting_status})")
                 lines.append("━━━━━━━━━━━━━━━━━━━")
                 if rem:
                     lines.append(f"⚠️ {len(rem)} transaction(s) still need details before confirming.")
@@ -268,8 +269,10 @@ def orchestrate_inbound_message(
             else:
                 target_cid = conversation.get("active_candidate_id")
                 target = next((c for c in active_list if c.candidate_id == target_cid), active_list[-1])
-                if target.candidate.needs_clarification or target.candidate.requires_review:
-                    clarification = conversation.get("latest_question") or "Please provide the missing details first before confirming."
+                preflight = getattr(service.ledger, "confirmation_holds", None)
+                holds = preflight(merchant.merchant_id, target.candidate_id, service.clock()) if preflight else []
+                if (target.candidate.needs_clarification or target.candidate.requires_review) and bool(holds):
+                    clarification = hold_message(holds, language, script) if holds else (conversation.get("latest_question") or "Please provide the missing details first before confirming.")
                     return None, OutboundMessage(
                         recipient_phone=message.sender_phone,
                         text_content=f"{clarification}\n\n(Please provide the missing details first before confirming.)",
@@ -304,8 +307,17 @@ def orchestrate_inbound_message(
         if query:
             return None, query
 
+    is_inventory_msg = bool(
+        intent == "stock_added"
+        or re.search(
+            r"\b(inventory|stock|maal|saraku|boxes|bottles|packets|pieces)\b.*\b(have|add|added|in my|opening)\b|\b(have|got|added|opening)\b.*\b(inventory|stock|boxes|packets)\b|స్టాక్|సరుకు|ఇన్వెంటరీ",
+            raw_msg,
+            re.I,
+        )
+    )
+
     # Status queries for pending candidates
-    if message.message_type == MessageType.TEXT and (
+    if not is_inventory_msg and message.message_type == MessageType.TEXT and (
         intent == "query_pending_status"
         or raw_msg in ("continue", "pending", "status", "what are pending", "details")
     ):
@@ -314,9 +326,10 @@ def orchestrate_inbound_message(
         if active_list:
             lines = [f"📋 *Pending Transactions on Hold ({len(active_list)}):*\n━━━━━━━━━━━━━━━━━━━"]
             for i, ac in enumerate(active_list, start=1):
-                b_name = ac.candidate.buyer_name or "Sale"
+                b_name = ac.candidate.buyer_name or ("Stock In" if getattr(ac.candidate, "transaction_type", "") in ("stock_added", "production") else "Sale")
                 st = "Needs Review" if (ac.candidate.requires_review or ac.candidate.needs_clarification) else "Ready to Confirm"
-                lines.append(f"{i}. *{b_name}:* ₹{ac.candidate.total_amount:,.2f} — _{st}_ (ID: {ac.candidate_id[:8]}...)")
+                amt_str = f": ₹{ac.candidate.total_amount:,.2f}" if ac.candidate.total_amount is not None else ""
+                lines.append(f"{i}. *{b_name}*{amt_str} — _{st}_ (ID: {ac.candidate_id[:8]}...)")
             lines.append("━━━━━━━━━━━━━━━━━━━")
             lines.append("These transactions are on hold and will NOT be committed until you confirm.")
             lines.append("Reply *Confirm* or *Confirm all* to post, or *Cancel previous* to discard.")
@@ -349,6 +362,7 @@ def orchestrate_inbound_message(
     )
     if (
         not is_media_msg
+        and not is_inventory_msg
         and message.message_type == MessageType.TEXT
         and conversation.get("active_candidate_id")
         and (
@@ -415,8 +429,9 @@ def orchestrate_inbound_message(
         )
         lines = [f"📋 *{len(staged_rows)} Transactions Extracted & Staged:*\n━━━━━━━━━━━━━━━━━━━"]
         for i, sr in enumerate(staged_rows, start=1):
-            b = sr.candidate.buyer_name or "Sale"
-            lines.append(f"{i}. *{b}:* ₹{sr.candidate.total_amount:,.2f} (Candidate: {sr.candidate_id[:8]}...)")
+            b = sr.candidate.buyer_name or ("Stock In" if getattr(sr.candidate, "transaction_type", "") in ("stock_added", "production") else "Sale")
+            amt_str = f": ₹{sr.candidate.total_amount:,.2f}" if sr.candidate.total_amount is not None else ""
+            lines.append(f"{i}. *{b}*{amt_str} (Candidate: {sr.candidate_id[:8]}...)")
         lines.append("━━━━━━━━━━━━━━━━━━━")
         lines.append("Nothing posted yet. All transactions are held pending your confirmation.")
         lines.append("Reply *Confirm all* to post all, or *Cancel all* to discard.")
@@ -524,9 +539,10 @@ def orchestrate_inbound_message(
         if len(active_list) > 1:
             queue_info = f"\n\n📋 *All Pending Transactions ({len(active_list)} on hold)*:\n"
             for i, ac in enumerate(active_list, start=1):
-                b = ac.candidate.buyer_name or "Sale"
+                b = ac.candidate.buyer_name or ("Stock In" if getattr(ac.candidate, "transaction_type", "") in ("stock_added", "production") else "Sale")
                 cur = " 👈 (Latest)" if ac.candidate_id == row.candidate_id else ""
-                queue_info += f"• #{i} {b}: ₹{ac.candidate.total_amount:,.2f}{cur}\n"
+                amt_str = f": ₹{ac.candidate.total_amount:,.2f}" if ac.candidate.total_amount is not None else ""
+                queue_info += f"• #{i} {b}{amt_str}{cur}\n"
             queue_info += "\n(Held on hold until confirmed. Reply 'Confirm all' to post all, or 'Cancel previous'.)"
             body += queue_info
         if review:

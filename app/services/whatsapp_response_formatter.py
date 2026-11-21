@@ -227,6 +227,13 @@ def candidate_summary(candidate, candidate_id: str, language: str, script: str,
 def posting_summary(result: PostingResult, language: str, script: str) -> str:
     labels = copy_for(language, script)
     balances = ", ".join(f"{sku}: {quantity}" for sku, quantity in result.inventory_balance.items())
+    if (result.amount_paid or 0) == 0 and (result.credit_outstanding or 0) == 0 and result.inventory_balance:
+        return "\n".join([
+            f"✅ *Stock Recorded to Inventory Ledger*",
+            f"{labels['status']}: {result.posting_status}",
+            f"{labels['transaction']}: {result.transaction_id}",
+            f"{labels['inventory']}: {balances}",
+        ])
     return "\n".join([
         f"✅ *{labels['posted']}*",
         f"{labels['status']}: {result.posting_status}",
