@@ -101,7 +101,12 @@ class ConfirmationService:
     def parse_reply(self, merchant: AuthenticatedMerchant, message) -> tuple[str, str] | None:
         from models.canonical import MessageType
         if message.message_type in (MessageType.INTERACTIVE_BUTTON, MessageType.INTERACTIVE_LIST):
-            if message.interactive_id and (message.interactive_id.startswith("retry_") or message.interactive_id.startswith("LANG_")):
+            if message.interactive_id and (
+                message.interactive_id.startswith("retry_")
+                or message.interactive_id.startswith("LANG_")
+                or message.interactive_id.startswith("view_pdf_")
+                or message.interactive_id.startswith("view_ledger_")
+            ):
                 return None
             match = _ID.fullmatch(message.interactive_id or "")
             if not match:

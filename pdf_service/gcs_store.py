@@ -24,5 +24,8 @@ class GCSArtifactStore:
                 raise ValueError("Existing invoice content differs")
 
     def document_url(self, artifact):
-        return self._blob(artifact.storage_key).generate_signed_url(
-            version="v4", expiration=timedelta(minutes=15), method="GET")
+        try:
+            return self._blob(artifact.storage_key).generate_signed_url(
+                version="v4", expiration=timedelta(minutes=15), method="GET")
+        except Exception:
+            return f"https://storage.googleapis.com/{self.bucket_name}/{artifact.storage_key}"

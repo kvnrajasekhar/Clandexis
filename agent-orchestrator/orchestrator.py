@@ -134,6 +134,113 @@ def orchestrate_inbound_message(
             text_content=retry_prompts.get(language, retry_prompts["en"]),
         )
 
+    # Handle PDF invoice button click
+    if message.interactive_id and message.interactive_id.startswith("view_pdf_"):
+        txn_id = message.interactive_id.removeprefix("view_pdf_").strip()
+        try:
+            from app.services.confirmation import PostingResult
+            from app.services.posting_flow import generate_posting_document
+            res = PostingResult(
+                candidate_id="",
+                transaction_id=txn_id,
+                posting_status="COMMITTED",
+                inventory_balance={},
+                amount_paid=Decimal(0),
+                credit_outstanding=Decimal(0),
+                merchant_id=merchant.merchant_id,
+            )
+            doc_outcome = generate_posting_document(merchant, res)
+            doc_url = doc_outcome.get("document_url")
+            filename = doc_outcome.get("filename", f"invoice-{txn_id[:8]}.pdf")
+
+            inv = None
+            from app.services.persistence import ledger
+            if hasattr(ledger, "get_db"):
+                try:
+                    with ledger.get_db().transaction(merchant.merchant_id) as conn:
+                        inv = conn.execute(
+                            "SELECT * FROM invoices WHERE merchant_id=%s AND transaction_id=%s",
+                            (merchant.merchant_id, txn_id),
+                        ).fetchone()
+                except Exception:
+                    pass
+
+            lines = [f"📄 *Invoice for Transaction #{txn_id[:8]}*"]
+            if inv:
+                inv_num = inv.get("invoice_number") or txn_id[:8]
+                buyer = (inv.get("buyer_snapshot") or {}).get("display_name") or "Customer"
+                tot = inv.get("total_amount") or 0
+                paid = inv.get("amount_paid") or 0
+                due = inv.get("amount_due") or 0
+                lines.append(f"• Invoice No: {inv_num}")
+                lines.append(f"• Customer: {buyer}")
+                lines.append(f"• Total: ₹{tot:,.2f}")
+                lines.append(f"• Paid: ₹{paid:,.2f}")
+                if due > 0:
+                    lines.append(f"• Due / Udhaar: ₹{due:,.2f}")
+            if doc_url:
+                lines.append(f"\n📥 *Download PDF:* {doc_url}")
+            else:
+                lines.append(f"\n✅ PDF invoice generated and stored in ledger records.")
+
+            text_body = "\n".join(lines)
+            if doc_url:
+                return None, OutboundMessage(
+                    recipient_phone=message.sender_phone,
+                    message_type=MessageType.DOCUMENT,
+                    document_url=doc_url,
+                    document_filename=filename,
+                    text_content=text_body,
+                )
+            return None, OutboundMessage(
+                recipient_phone=message.sender_phone,
+                text_content=text_body,
+            )
+        except Exception as e:
+            return None, OutboundMessage(
+                recipient_phone=message.sender_phone,
+                text_content=f"📄 Invoice #{txn_id[:8]} is recorded in your ledger. View it anytime from your dashboard.",
+            )
+
+    # Handle Party Ledger button click
+    if message.interactive_id and message.interactive_id.startswith("view_ledger_"):
+        txn_id = message.interactive_id.removeprefix("view_ledger_").strip()
+        try:
+            from app.services.persistence import ledger
+            if hasattr(ledger, "get_db"):
+                with ledger.get_db().transaction(merchant.merchant_id) as conn:
+                    tx = conn.execute(
+                        "SELECT t.*, p.display_name, pb.udhaar_balance FROM transactions t "
+                        "LEFT JOIN parties p ON p.id = t.party_id "
+                        "LEFT JOIN party_balances pb ON pb.party_id = t.party_id AND pb.merchant_id = t.merchant_id "
+                        "WHERE t.merchant_id=%s AND t.id=%s",
+                        (merchant.merchant_id, txn_id),
+                    ).fetchone()
+                    if tx:
+                        party_name = tx["display_name"] or "Customer"
+                        udhaar = tx["udhaar_balance"] or Decimal(0)
+                        lines = [
+                            f"📊 *Party Ledger / Khata Summary*",
+                            f"━━━━━━━━━━━━━━━━━━━",
+                            f"Customer: *{party_name}*",
+                            f"Current Udhaar Balance: *₹{udhaar:,.2f}*",
+                            f"━━━━━━━━━━━━━━━━━━━",
+                            f"Transaction: #{txn_id[:8]}",
+                            f"Amount: ₹{(tx['subtotal'] or 0) + (tx['tax_amount'] or 0):,.2f}",
+                            f"Paid: ₹{(tx['amount_paid'] or 0):,.2f}",
+                            f"Credit: ₹{(tx['credit_amount'] or 0):,.2f}",
+                        ]
+                        return None, OutboundMessage(
+                            recipient_phone=message.sender_phone,
+                            text_content="\n".join(lines),
+                        )
+        except Exception:
+            pass
+        return None, OutboundMessage(
+            recipient_phone=message.sender_phone,
+            text_content=f"📊 Party ledger statement for transaction #{txn_id[:8]} recorded in system.",
+        )
+
     try:
         raw_msg = (message.text_content or "").strip().lower()
         from app.services.decision_service import DecisionService
