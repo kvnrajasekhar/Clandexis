@@ -1,5 +1,6 @@
 """Canonical WhatsApp orchestration over persistent candidate and ledger services."""
 
+from decimal import Decimal
 import re
 
 from app.services.confirmation import (
@@ -25,6 +26,111 @@ from models.canonical import (
 
 pipeline = None  # Lazy: callbacks and read-only queries never initialize Gemini.
 query_service = QueryService()
+
+
+def get_latest_committed_transaction(merchant_id: str) -> dict | None:
+    """Fetch the most recently committed transaction for the merchant from database."""
+    from app.services.persistence import ledger
+    if hasattr(ledger, "get_db"):
+        try:
+            with ledger.get_db().transaction(merchant_id) as conn:
+                row = conn.execute(
+                    "SELECT id, created_at, subtotal, tax_amount, amount_paid, credit_amount "
+                    "FROM transactions WHERE merchant_id=%s ORDER BY created_at DESC LIMIT 1",
+                    (merchant_id,),
+                ).fetchone()
+                if row:
+                    return dict(row)
+        except Exception:
+            pass
+    elif hasattr(ledger, "db") and ledger.db is not None:
+        try:
+            docs = (
+                ledger.db.collection("merchants")
+                .document(merchant_id)
+                .collection("transactions")
+                .order_by("created_at", direction="DESCENDING")
+                .limit(1)
+                .get()
+            )
+            if docs:
+                d = docs[0].to_dict()
+                d["id"] = docs[0].id
+                return d
+        except Exception:
+            pass
+    return None
+
+
+def deliver_invoice_outbound(
+    merchant: AuthenticatedMerchant,
+    recipient_phone: str,
+    txn_id: str,
+) -> OutboundMessage:
+    """Generate or retrieve the commercial PDF invoice and return outbound message."""
+    try:
+        from app.services.posting_flow import generate_posting_document
+        res = PostingResult(
+            candidate_id="",
+            transaction_id=txn_id,
+            posting_status="COMMITTED",
+            inventory_balance={},
+            amount_paid=Decimal(0),
+            credit_outstanding=Decimal(0),
+            merchant_id=merchant.merchant_id,
+        )
+        doc_outcome = generate_posting_document(merchant, res)
+        doc_url = doc_outcome.get("document_url")
+        filename = doc_outcome.get("filename", f"invoice-{txn_id[:8]}.pdf")
+
+        inv = None
+        from app.services.persistence import ledger
+        if hasattr(ledger, "get_db"):
+            try:
+                with ledger.get_db().transaction(merchant.merchant_id) as conn:
+                    inv = conn.execute(
+                        "SELECT * FROM invoices WHERE merchant_id=%s AND transaction_id=%s",
+                        (merchant.merchant_id, txn_id),
+                    ).fetchone()
+            except Exception:
+                pass
+
+        lines = [f"📄 *Invoice for Transaction #{txn_id[:8]}*"]
+        if inv:
+            inv_num = inv.get("invoice_number") or txn_id[:8]
+            buyer = (inv.get("buyer_snapshot") or {}).get("display_name") or "Customer"
+            tot = inv.get("total_amount") or 0
+            paid = inv.get("amount_paid") or 0
+            due = inv.get("amount_due") or 0
+            lines.append(f"• Invoice No: {inv_num}")
+            lines.append(f"• Customer: {buyer}")
+            lines.append(f"• Total: ₹{tot:,.2f}")
+            lines.append(f"• Paid: ₹{paid:,.2f}")
+            if due > 0:
+                lines.append(f"• Due / Udhaar: ₹{due:,.2f}")
+        if doc_url:
+            lines.append(f"\n📥 *Download PDF:* {doc_url}")
+        else:
+            lines.append(f"\n✅ PDF invoice generated and stored in ledger records.")
+
+        text_body = "\n".join(lines)
+        if doc_url:
+            return OutboundMessage(
+                recipient_phone=recipient_phone,
+                message_type=MessageType.DOCUMENT,
+                document_url=doc_url,
+                document_filename=filename,
+                text_content=text_body,
+            )
+        return OutboundMessage(
+            recipient_phone=recipient_phone,
+            text_content=text_body,
+        )
+    except Exception:
+        return OutboundMessage(
+            recipient_phone=recipient_phone,
+            text_content=f"📄 Invoice #{txn_id[:8]} is recorded in your ledger. View it anytime from your dashboard.",
+        )
 
 
 def posting_outbound(phone: str, result: PostingResult, language: str = "en",
@@ -137,70 +243,7 @@ def orchestrate_inbound_message(
     # Handle PDF invoice button click
     if message.interactive_id and message.interactive_id.startswith("view_pdf_"):
         txn_id = message.interactive_id.removeprefix("view_pdf_").strip()
-        try:
-            from app.services.confirmation import PostingResult
-            from app.services.posting_flow import generate_posting_document
-            res = PostingResult(
-                candidate_id="",
-                transaction_id=txn_id,
-                posting_status="COMMITTED",
-                inventory_balance={},
-                amount_paid=Decimal(0),
-                credit_outstanding=Decimal(0),
-                merchant_id=merchant.merchant_id,
-            )
-            doc_outcome = generate_posting_document(merchant, res)
-            doc_url = doc_outcome.get("document_url")
-            filename = doc_outcome.get("filename", f"invoice-{txn_id[:8]}.pdf")
-
-            inv = None
-            from app.services.persistence import ledger
-            if hasattr(ledger, "get_db"):
-                try:
-                    with ledger.get_db().transaction(merchant.merchant_id) as conn:
-                        inv = conn.execute(
-                            "SELECT * FROM invoices WHERE merchant_id=%s AND transaction_id=%s",
-                            (merchant.merchant_id, txn_id),
-                        ).fetchone()
-                except Exception:
-                    pass
-
-            lines = [f"📄 *Invoice for Transaction #{txn_id[:8]}*"]
-            if inv:
-                inv_num = inv.get("invoice_number") or txn_id[:8]
-                buyer = (inv.get("buyer_snapshot") or {}).get("display_name") or "Customer"
-                tot = inv.get("total_amount") or 0
-                paid = inv.get("amount_paid") or 0
-                due = inv.get("amount_due") or 0
-                lines.append(f"• Invoice No: {inv_num}")
-                lines.append(f"• Customer: {buyer}")
-                lines.append(f"• Total: ₹{tot:,.2f}")
-                lines.append(f"• Paid: ₹{paid:,.2f}")
-                if due > 0:
-                    lines.append(f"• Due / Udhaar: ₹{due:,.2f}")
-            if doc_url:
-                lines.append(f"\n📥 *Download PDF:* {doc_url}")
-            else:
-                lines.append(f"\n✅ PDF invoice generated and stored in ledger records.")
-
-            text_body = "\n".join(lines)
-            if doc_url:
-                return None, OutboundMessage(
-                    recipient_phone=message.sender_phone,
-                    message_type=MessageType.DOCUMENT,
-                    document_url=doc_url,
-                    document_filename=filename,
-                    text_content=text_body,
-                )
-            return None, OutboundMessage(
-                recipient_phone=message.sender_phone,
-                text_content=text_body,
-            )
-        except Exception as e:
-            return None, OutboundMessage(
-                recipient_phone=message.sender_phone,
-                text_content=f"📄 Invoice #{txn_id[:8]} is recorded in your ledger. View it anytime from your dashboard.",
-            )
+        return None, deliver_invoice_outbound(merchant, message.sender_phone, txn_id)
 
     # Handle Party Ledger button click
     if message.interactive_id and message.interactive_id.startswith("view_ledger_"):
@@ -243,6 +286,32 @@ def orchestrate_inbound_message(
 
     try:
         raw_msg = (message.text_content or "").strip().lower()
+
+        # Handle invoice request via text (e.g. "give me invoice", "invoice", "send bill", "బిల్లు", "రసీదు", "रसीद")
+        is_invoice_request = bool(
+            message.message_type == MessageType.TEXT
+            and re.search(
+                r"\b(invoice|bill|receipt|challan|pdf invoice|tax invoice|commercial invoice)\b|"
+                r"ఇన్వాయిస్|రసీదు|బిల్లు|రసీదులు|బిల్|बिल|रसीद|चालान",
+                raw_msg,
+                re.I,
+            )
+            and not re.search(r"\b(sold|sell|sale|bought|purchase|ammanu|becha|add|added|produce|manufactured)\b", raw_msg, re.I)
+        )
+        if is_invoice_request:
+            target_txn_id = conversation.get("last_transaction_id")
+            if not target_txn_id:
+                latest_tx = get_latest_committed_transaction(merchant.merchant_id)
+                if latest_tx:
+                    target_txn_id = str(latest_tx["id"])
+            if target_txn_id:
+                return None, deliver_invoice_outbound(merchant, message.sender_phone, target_txn_id)
+            else:
+                return None, OutboundMessage(
+                    recipient_phone=message.sender_phone,
+                    text_content="📄 No transactions have been recorded yet. Once you confirm a sale, your invoice will be generated and downloadable here.",
+                )
+
         from app.services.decision_service import DecisionService
         decision_info = DecisionService().classify_merchant_intent(
             message.text_content, has_active_candidate=bool(conversation.get("active_candidate_id"))
@@ -274,6 +343,7 @@ def orchestrate_inbound_message(
                     expires_at=None,
                 )
             if isinstance(result, PostingResult):
+                conversation["last_transaction_id"] = result.transaction_id
                 return result, posting_outbound(message.sender_phone, result, language, script)
             labels = copy_for(language, script)
             return None, OutboundMessage(
@@ -337,6 +407,32 @@ def orchestrate_inbound_message(
         ):
             active_list = service.ledger.active_candidates(merchant.merchant_id, service.clock())
             if not active_list:
+                latest_tx = get_latest_committed_transaction(merchant.merchant_id)
+                if latest_tx:
+                    txn_id = str(latest_tx["id"])
+                    tot = (latest_tx.get("subtotal") or 0) + (latest_tx.get("tax_amount") or 0)
+                    tot_str = f" (₹{tot:,.2f})" if tot > 0 else ""
+                    return None, OutboundMessage(
+                        recipient_phone=message.sender_phone,
+                        message_type=MessageType.INTERACTIVE_BUTTON,
+                        interactive_header="✅ Already Confirmed",
+                        interactive_body=(
+                            f"Your recent transaction #{txn_id[:8]}{tot_str} is already confirmed and recorded in your ledger.\n\n"
+                            f"There are no other pending transactions waiting for confirmation."
+                        ),
+                        interactive_footer="Clandexis Invisible ERP",
+                        buttons=[
+                            CanonicalButton(
+                                id=f"view_pdf_{txn_id}",
+                                title="📄 PDF Invoice",
+                            ),
+                            CanonicalButton(
+                                id=f"view_ledger_{txn_id}",
+                                title="📊 Party Ledger",
+                            ),
+                        ],
+                        text_content=f"✅ Your recent transaction #{txn_id[:8]}{tot_str} is already confirmed and recorded in your ledger. There are no other pending transactions.",
+                    )
                 return None, OutboundMessage(
                     recipient_phone=message.sender_phone,
                     text_content="There are no active pending transactions to confirm.",
@@ -396,6 +492,7 @@ def orchestrate_inbound_message(
                 else:
                     conversation.update(active_candidate_id=None, latest_question=None, missing_fields=[], candidate_revision=None, expires_at=None)
                 if isinstance(result, PostingResult):
+                    conversation["last_transaction_id"] = result.transaction_id
                     return result, posting_outbound(message.sender_phone, result, language, script)
     except ConfirmationError as exc:
         return None, OutboundMessage(
