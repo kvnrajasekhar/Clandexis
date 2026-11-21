@@ -105,10 +105,12 @@ class DecisionService:
         lower = cleaned_text.lower()
         if re.search(r"\b(pending|status|chupinchu|niluvai|kya pending|what are pending|show)\b|చూపించు|ఎన్ని ఉన్నాయి|நிலுவை", lower, re.I):
             return {"intent": "query_pending_status", "confidence": 0.98, "probabilities": {"query_pending_status": 0.98}}
-        if re.search(r"^(yes|confirm|ok|proceed|sure|hownu|sare|avunu|sari|theek|haan)\b|^[✓👍]|సరే|హౌను|అవును|சரி|हाँ|ठीक", lower, re.I):
-            return {"intent": "confirm_candidate" if has_active_candidate else "general_greeting", "confidence": 0.95, "probabilities": {}}
-        if re.search(r"^(cancel|no|reject|vaddu|raddu|vendam|drop|nahi)\b|^[❌🚫]|వద్దు|రద్దు|వేண்டாம்|नहीं", lower, re.I):
-            return {"intent": "cancel_candidate" if has_active_candidate else "general_greeting", "confidence": 0.95, "probabilities": {}}
+        if re.search(r"\b(confirm|approve)\b.*(all|previous|last|candidate)?|"
+                     r"^(yes|confirm|ok|proceed|sure|hownu|sare|avunu|sari|theek|haan)\b|^[✓👍]|సరే|హౌను|అవును|சரி|हाँ|ठीक", lower, re.I):
+            return {"intent": "confirm_candidate", "confidence": 0.95, "probabilities": {}}
+        if re.search(r"\b(cancel|raddu|vaddu|drop|discard|delete)\b.*(previous|last|transaction|bill|candidate)?|"
+                     r"^(cancel|no|reject|vaddu|raddu|vendam|drop|nahi)\b|^[❌🚫]|వద్దు|రద్దు|వేండாம்|नहीं|మునుపటి.*రద్దు", lower, re.I):
+            return {"intent": "cancel_candidate", "confidence": 0.95, "probabilities": {}}
         if has_active_candidate and re.search(r"^\d+(\.\d+)?$|^price\b|^rate\b|^cost\b|ధర|ఖరీదు|விலை|भाव", lower, re.I):
             return {"intent": "clarify_field", "confidence": 0.90, "probabilities": {}}
         if re.search(r"\b(sold|sell|sale|ammanu|ammnu|becha|bechi|sales|bill)\b|అమ్మ|बेच|விற்பனை", lower, re.I):

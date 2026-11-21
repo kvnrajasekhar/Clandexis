@@ -135,81 +135,37 @@ def orchestrate_inbound_message(
         )
 
     try:
-        if message.message_type == MessageType.TEXT and (
-            message.text_content or ""
-        ).strip().upper() in ("YES", "NO", "AVUNU", "HAAN", "AAMA", "CONFIRM", "CANCEL", "సరే", "சரி"):
-            if conversation.get("active_candidate_id"):
-                row = service.ledger.get_candidate(
-                    merchant.merchant_id, conversation["active_candidate_id"]
-                )
-                if row.candidate.needs_clarification or row.candidate.requires_review:
-                    clarification = conversation.get("latest_question") or "Please provide the missing details first before confirming."
-                    return None, OutboundMessage(
-                        recipient_phone=message.sender_phone,
-                        text_content=f"{clarification}\n\n(Please provide the missing details first before confirming.)",
-                    )
-                if (message.text_content or "").strip().upper() in ("YES", "AVUNU", "HAAN", "AAMA", "CONFIRM", "సరే", "சரி"):
-                    result = service.handle_confirmation(
-                        merchant, row.candidate_id, "confirm", message.message_id
-                    )
-                    conversation["last_candidate_id"] = row.candidate_id
-                    conversation.update(
-                        active_candidate_id=None,
-                        latest_question=None,
-                        missing_fields=[],
-                        candidate_revision=None,
-                        expires_at=None,
-                    )
-                    if isinstance(result, PostingResult):
-                        return result, posting_outbound(message.sender_phone, result, language, script)
-                else:
-                    result = service.handle_confirmation(
-                        merchant, row.candidate_id, "cancel", message.message_id
-                    )
-                    conversation.update(
-                        active_candidate_id=None,
-                        latest_question=None,
-                        missing_fields=[],
-                        candidate_revision=None,
-                        expires_at=None,
-                    )
-                    labels = copy_for(language, script)
-                    return None, OutboundMessage(
-                        recipient_phone=message.sender_phone,
-                        text_content=labels["cancelled"],
-                    )
-            raise ConfirmationError(
-                "Use the Confirm or Cancel button for the specific candidate."
-            )
+        raw_msg = (message.text_content or "").strip().lower()
+        from app.services.decision_service import DecisionService
+        decision_info = DecisionService().classify_merchant_intent(
+            message.text_content, has_active_candidate=bool(conversation.get("active_candidate_id"))
+        )
+        intent = decision_info.get("intent")
+
+        # 1. Interactive Button reply handling
         reply = service.parse_reply(merchant, message)
         if reply:
             candidate_id, action = reply
-            if conversation.get("active_candidate_id") not in (None, candidate_id):
-                raise ConfirmationError(
-                    "Another candidate is active. Continue or cancel it first."
-                )
-            if (
-                action == "confirm"
-                and conversation.get("active_candidate_id") == candidate_id
-            ):
-                current = service.ledger.get_candidate(
-                    merchant.merchant_id, candidate_id
-                )
-                if conversation.get("candidate_revision") != str(current.revision):
-                    raise ConfirmationError(
-                        "Candidate changed. Review its latest revision in the dashboard."
-                    )
             result = service.handle_confirmation(
                 merchant, candidate_id, action, message.message_id
             )
             conversation["last_candidate_id"] = candidate_id
-            conversation.update(
-                active_candidate_id=None,
-                latest_question=None,
-                missing_fields=[],
-                candidate_revision=None,
-                expires_at=None,
-            )
+            active_list = service.ledger.active_candidates(merchant.merchant_id, service.clock())
+            rem = [c for c in active_list if c.candidate_id != candidate_id]
+            if rem:
+                conversation.update(
+                    active_candidate_id=rem[-1].candidate_id,
+                    candidate_revision=str(rem[-1].revision),
+                    expires_at=rem[-1].expires_at,
+                )
+            else:
+                conversation.update(
+                    active_candidate_id=None,
+                    latest_question=None,
+                    missing_fields=[],
+                    candidate_revision=None,
+                    expires_at=None,
+                )
             if isinstance(result, PostingResult):
                 return result, posting_outbound(message.sender_phone, result, language, script)
             labels = copy_for(language, script)
@@ -217,6 +173,120 @@ def orchestrate_inbound_message(
                 recipient_phone=message.sender_phone,
                 text_content=labels["cancelled"],
             )
+
+        # 2. Text Cancellation handling (e.g. "Cancel the previous transaction", "cancel all", "రద్దు")
+        if message.message_type == MessageType.TEXT and (
+            intent == "cancel_candidate"
+            or re.search(r"\b(cancel|raddu|vaddu|drop|discard|delete)\b|^[❌🚫]|వద్దు|రద్దు|వేండாம்|नहीं", raw_msg, re.I)
+        ):
+            active_list = service.ledger.active_candidates(merchant.merchant_id, service.clock())
+            if active_list:
+                labels = copy_for(language, script)
+                if "all" in raw_msg:
+                    for ac in active_list:
+                        service.handle_confirmation(merchant, ac.candidate_id, "cancel", f"{message.message_id}_{ac.candidate_id[:6]}")
+                    conversation.update(
+                        active_candidate_id=None, latest_question=None, missing_fields=[], candidate_revision=None, expires_at=None
+                    )
+                    return None, OutboundMessage(
+                        recipient_phone=message.sender_phone,
+                        text_content=f"✅ Cancelled all ({len(active_list)}) pending transactions. Nothing posted to ledger.",
+                    )
+                else:
+                    target_cid = conversation.get("active_candidate_id")
+                    target = next((c for c in active_list if c.candidate_id == target_cid), active_list[-1])
+                    result = service.handle_confirmation(merchant, target.candidate_id, "cancel", message.message_id)
+                    rem = [c for c in active_list if c.candidate_id != target.candidate_id]
+                    if rem:
+                        conversation.update(
+                            active_candidate_id=rem[-1].candidate_id,
+                            candidate_revision=str(rem[-1].revision),
+                            expires_at=rem[-1].expires_at,
+                        )
+                    else:
+                        conversation.update(
+                            active_candidate_id=None, latest_question=None, missing_fields=[], candidate_revision=None, expires_at=None
+                        )
+                    t_desc = target.candidate.buyer_name or (target.candidate.items[0].item_name if target.candidate.items else "Transaction")
+                    reply_text = f"✅ Cancelled previous transaction ({t_desc}: ₹{target.candidate.total_amount:,.2f}). Nothing was posted to your ledger."
+                    if rem:
+                        reply_text += f"\n\nYou still have {len(rem)} other pending transaction(s) on hold."
+                    return None, OutboundMessage(
+                        recipient_phone=message.sender_phone,
+                        text_content=reply_text,
+                    )
+            else:
+                return None, OutboundMessage(
+                    recipient_phone=message.sender_phone,
+                    text_content="There are no active pending transactions to cancel.",
+                )
+
+        # 3. Text Confirmation handling (e.g. "Confirm all", "Confirm", "YES", "సరే")
+        if message.message_type == MessageType.TEXT and (
+            intent == "confirm_candidate"
+            or raw_msg in ("yes", "confirm", "ok", "sare", "avunu", "theek", "சரி", "సరే", "हाँ")
+            or re.search(r"\bconfirm\s+all\b", raw_msg, re.I)
+        ):
+            active_list = service.ledger.active_candidates(merchant.merchant_id, service.clock())
+            if not active_list:
+                return None, OutboundMessage(
+                    recipient_phone=message.sender_phone,
+                    text_content="There are no active pending transactions to confirm.",
+                )
+            if "all" in raw_msg:
+                ready_cands = [
+                    c for c in active_list
+                    if not c.candidate.needs_clarification
+                    and not c.candidate.requires_review
+                    and c.candidate.validation_status == "ACCEPTED"
+                    and not c.candidate.missing_fields
+                ]
+                if not ready_cands:
+                    clarification = conversation.get("latest_question") or "Pending transactions require missing details or review before they can be confirmed."
+                    return None, OutboundMessage(recipient_phone=message.sender_phone, text_content=clarification)
+                results = []
+                for rc in ready_cands:
+                    try:
+                        res = service.handle_confirmation(merchant, rc.candidate_id, "confirm", f"{message.message_id}_{rc.candidate_id[:6]}")
+                        if isinstance(res, PostingResult):
+                            results.append(res)
+                    except ConfirmationError:
+                        pass
+                rem = [c for c in active_list if c not in ready_cands]
+                if rem:
+                    conversation.update(active_candidate_id=rem[-1].candidate_id)
+                else:
+                    conversation.update(active_candidate_id=None, latest_question=None, missing_fields=[], candidate_revision=None, expires_at=None)
+                lines = [f"✅ *Recorded {len(results)} Transactions to Ledger:*\n━━━━━━━━━━━━━━━━━━━"]
+                for r in results:
+                    tot = r.amount_paid + r.credit_outstanding
+                    lines.append(f"• Txn #{r.transaction_id}: ₹{tot:,.2f} ({r.posting_status})")
+                lines.append("━━━━━━━━━━━━━━━━━━━")
+                if rem:
+                    lines.append(f"⚠️ {len(rem)} transaction(s) still need details before confirming.")
+                return (results[-1] if results else None), OutboundMessage(recipient_phone=message.sender_phone, text_content="\n".join(lines))
+            else:
+                target_cid = conversation.get("active_candidate_id")
+                target = next((c for c in active_list if c.candidate_id == target_cid), active_list[-1])
+                if target.candidate.needs_clarification or target.candidate.requires_review:
+                    clarification = conversation.get("latest_question") or "Please provide the missing details first before confirming."
+                    return None, OutboundMessage(
+                        recipient_phone=message.sender_phone,
+                        text_content=f"{clarification}\n\n(Please provide the missing details first before confirming.)",
+                    )
+                result = service.handle_confirmation(merchant, target.candidate_id, "confirm", message.message_id)
+                conversation["last_candidate_id"] = target.candidate_id
+                rem = [c for c in active_list if c.candidate_id != target.candidate_id]
+                if rem:
+                    conversation.update(
+                        active_candidate_id=rem[-1].candidate_id,
+                        candidate_revision=str(rem[-1].revision),
+                        expires_at=rem[-1].expires_at,
+                    )
+                else:
+                    conversation.update(active_candidate_id=None, latest_question=None, missing_fields=[], candidate_revision=None, expires_at=None)
+                if isinstance(result, PostingResult):
+                    return result, posting_outbound(message.sender_phone, result, language, script)
     except ConfirmationError as exc:
         return None, OutboundMessage(
             recipient_phone=message.sender_phone, text_content=str(exc)
@@ -234,86 +304,67 @@ def orchestrate_inbound_message(
         if query:
             return None, query
 
-    reviewing = None
-    if conversation.get("active_candidate_id"):
-        row = service.ledger.get_candidate(
-            merchant.merchant_id, conversation["active_candidate_id"]
-        )
-        if row.status != "AWAITING_CONFIRMATION" or row.expires_at <= service.clock():
-            conversation.update(
-                active_candidate_id=None,
-                latest_question=None,
-                missing_fields=[],
-                candidate_revision=None,
-                expires_at=None,
-            )
-            return None, OutboundMessage(
-                recipient_phone=message.sender_phone,
-                text_content=(
-                    "The pending candidate is closed or expired. "
-                    "Please resend your transaction."
-                ),
-            )
-        from app.services.decision_service import DecisionService
-        decision_info = DecisionService().classify_merchant_intent(
-            message.text_content, has_active_candidate=True
-        )
-        intent = decision_info.get("intent")
-        raw_msg = (message.text_content or "").strip().lower()
-
-        # A. Query pending status (e.g. "What are pending", "status", "చూపించు", "நிலுவை")
-        if intent == "query_pending_status" or raw_msg in ("continue", "pending", "status", "what are pending", "details"):
-            labels = copy_for(language, script)
-            summary = candidate_summary(row.candidate, row.candidate_id, language, script, review=row.candidate.requires_review)
-            clarification = conversation.get("latest_question")
-            body = f"{clarification}\n\n{summary}" if clarification else summary
-            buttons = [CanonicalButton(id=button_id(row.candidate_id, "cancel"), title=labels["cancel"])]
-            if not row.candidate.requires_review and not row.candidate.needs_clarification:
-                buttons.insert(0, CanonicalButton(id=button_id(row.candidate_id, "confirm"), title=labels["confirm"]))
+    # Status queries for pending candidates
+    if message.message_type == MessageType.TEXT and (
+        intent == "query_pending_status"
+        or raw_msg in ("continue", "pending", "status", "what are pending", "details")
+    ):
+        active_list = service.ledger.active_candidates(merchant.merchant_id, service.clock())
+        labels = copy_for(language, script)
+        if active_list:
+            lines = [f"📋 *Pending Transactions on Hold ({len(active_list)}):*\n━━━━━━━━━━━━━━━━━━━"]
+            for i, ac in enumerate(active_list, start=1):
+                b_name = ac.candidate.buyer_name or "Sale"
+                st = "Needs Review" if (ac.candidate.requires_review or ac.candidate.needs_clarification) else "Ready to Confirm"
+                lines.append(f"{i}. *{b_name}:* ₹{ac.candidate.total_amount:,.2f} — _{st}_ (ID: {ac.candidate_id[:8]}...)")
+            lines.append("━━━━━━━━━━━━━━━━━━━")
+            lines.append("These transactions are on hold and will NOT be committed until you confirm.")
+            lines.append("Reply *Confirm* or *Confirm all* to post, or *Cancel previous* to discard.")
+            body = "\n".join(lines)
+            buttons = []
+            latest = active_list[-1]
+            if not latest.candidate.requires_review and not latest.candidate.needs_clarification:
+                buttons.append(CanonicalButton(id=button_id(latest.candidate_id, "confirm"), title=labels["confirm"]))
+            buttons.append(CanonicalButton(id=button_id(latest.candidate_id, "cancel"), title=labels["cancel"]))
             return None, OutboundMessage(
                 recipient_phone=message.sender_phone,
                 message_type=MessageType.INTERACTIVE_BUTTON,
-                interactive_header="📋 " + labels.get("confirm_heading", "Pending Transaction"),
+                interactive_header="📋 " + labels.get("confirm_heading", "Pending Transactions"),
                 interactive_body=body,
                 interactive_footer="Clandexis Invisible ERP",
                 buttons=buttons,
                 text_content=body,
             )
-
-        # B. Direct confirmation via text
-        if intent == "confirm_candidate" or raw_msg in ("yes", "confirm", "ok", "sare", "avunu", "theek", "சரி", "సరే", "हाँ"):
-            if not row.candidate.needs_clarification and not row.candidate.requires_review:
-                result = service.handle_confirmation(merchant, row.candidate_id, "confirm", message.message_id)
-                conversation["last_candidate_id"] = row.candidate_id
-                conversation.update(active_candidate_id=None, latest_question=None, missing_fields=[], candidate_revision=None, expires_at=None)
-                if isinstance(result, PostingResult):
-                    return result, posting_outbound(message.sender_phone, result, language, script)
-            else:
-                clarification = conversation.get("latest_question") or "Please provide the missing details first before confirming."
-                return None, OutboundMessage(recipient_phone=message.sender_phone, text_content=clarification)
-
-        # C. Direct cancellation via text
-        if intent == "cancel_candidate" or raw_msg in ("cancel", "no", "vaddu", "raddu", "vendam", "వద్దు", "రద్దు", "வேண்டாம்"):
-            result = service.handle_confirmation(merchant, row.candidate_id, "cancel", message.message_id)
-            conversation.update(active_candidate_id=None, latest_question=None, missing_fields=[], candidate_revision=None, expires_at=None)
-            labels = copy_for(language, script)
-            return None, OutboundMessage(recipient_phone=message.sender_phone, text_content=labels["cancelled"])
-
-        # D. Starting a new sale while previous candidate is fully ready (not in review)
-        if intent == "new_sale" and not row.candidate.needs_clarification and not row.candidate.requires_review:
-            labels = copy_for(language, script)
+        else:
             return None, OutboundMessage(
                 recipient_phone=message.sender_phone,
-                text_content=f"You have a pending transaction {row.candidate_id}. Please confirm or cancel it first.",
-                message_type=MessageType.INTERACTIVE_BUTTON,
-                interactive_body=f"You have an unconfirmed transaction waiting. Would you like to confirm it or cancel it?",
-                buttons=[
-                    CanonicalButton(id=button_id(row.candidate_id, "confirm"), title=labels["confirm"]),
-                    CanonicalButton(id=button_id(row.candidate_id, "cancel"), title=labels["cancel"]),
-                ],
+                text_content="✅ No transactions are currently pending.",
             )
 
-        reviewing = row
+    reviewing = None
+    is_media_msg = (
+        message.message_type in (MessageType.IMAGE, MessageType.AUDIO, MessageType.DOCUMENT)
+        or media_bytes is not None
+        or bool(message.media_url)
+    )
+    if (
+        not is_media_msg
+        and message.message_type == MessageType.TEXT
+        and conversation.get("active_candidate_id")
+        and (
+            intent == "clarify_field"
+            or re.search(r"^\d+(\.\d+)?$|^price\b|^rate\b|^cost\b|ధర|ఖరీదు|விலை|भाव", raw_msg, re.I)
+        )
+    ):
+        try:
+            row = service.ledger.get_candidate(
+                merchant.merchant_id, conversation["active_candidate_id"]
+            )
+            if row.status == "AWAITING_CONFIRMATION" and row.expires_at > service.clock():
+                if row.candidate.needs_clarification or row.candidate.requires_review:
+                    reviewing = row
+        except Exception:
+            pass
 
     raw_text = message.text_content
     if reviewing:
@@ -351,10 +402,27 @@ def orchestrate_inbound_message(
             recipient_phone=message.sender_phone,
             text_content="Could not process your request. Please send clear details.",
         )
-    if len(transactions) != 1:
+    if len(transactions) > 1:
+        staged_rows = []
+        for idx, t_item in enumerate(transactions):
+            r = service.stage(merchant, message.message_id, idx, t_item)
+            staged_rows.append(r)
+        last_row = staged_rows[-1]
+        conversation.update(
+            active_candidate_id=last_row.candidate_id,
+            candidate_revision=str(last_row.revision),
+            expires_at=last_row.expires_at,
+        )
+        lines = [f"📋 *{len(staged_rows)} Transactions Extracted & Staged:*\n━━━━━━━━━━━━━━━━━━━"]
+        for i, sr in enumerate(staged_rows, start=1):
+            b = sr.candidate.buyer_name or "Sale"
+            lines.append(f"{i}. *{b}:* ₹{sr.candidate.total_amount:,.2f} (Candidate: {sr.candidate_id[:8]}...)")
+        lines.append("━━━━━━━━━━━━━━━━━━━")
+        lines.append("Nothing posted yet. All transactions are held pending your confirmation.")
+        lines.append("Reply *Confirm all* to post all, or *Cancel all* to discard.")
         return result, OutboundMessage(
             recipient_phone=message.sender_phone,
-            text_content="Please send one transaction at a time. Nothing posted.",
+            text_content="\n".join(lines),
         )
     tx = transactions[0]
     if tx.schema_version != "1.1":
@@ -398,42 +466,32 @@ def orchestrate_inbound_message(
 
     try:
         if reviewing:
-            if (
-                tx.transaction_type != reviewing.candidate.transaction_type
-                or (
-                    reviewing.candidate.buyer_name
-                    and tx.buyer_name
-                    and reviewing.candidate.buyer_name.lower() != tx.buyer_name.lower()
+            is_same = (
+                tx.transaction_type == reviewing.candidate.transaction_type
+                and (
+                    not reviewing.candidate.buyer_name
+                    or not tx.buyer_name
+                    or reviewing.candidate.buyer_name.lower() == tx.buyer_name.lower()
                 )
-            ):
-                raise ConfirmationError(
-                    "Reply changed the buyer or transaction type. "
-                    "Review the candidate in the dashboard."
+                and (
+                    len(tx.items) == len(reviewing.candidate.items)
+                    if (reviewing.candidate.items and tx.items)
+                    else True
                 )
-            if not tx.buyer_name and reviewing.candidate.buyer_name:
-                tx.buyer_name = reviewing.candidate.buyer_name
-            known = reviewing.candidate
-            if len(tx.items) != len(known.items) or any(
-                getattr(old, field) is not None
-                and getattr(old, field) != getattr(new, field)
-                for old, new in zip(known.items, tx.items)
-                for field in ("item_name", "quantity", "unit_price")
-            ):
-                raise ConfirmationError(
-                    "Reply changed known items. Continue or cancel the pending candidate."
-                )
-            if any(payment not in tx.payments for payment in known.payments):
-                raise ConfirmationError(
-                    "Reply changed known payments. Review the pending candidate."
-                )
-            row = service.ledger.replace_reviewed_candidate(
-                merchant.merchant_id,
-                reviewing.candidate_id,
-                reviewing.revision,
-                tx,
-                message.text_content or "Media clarification",
-                service.clock(),
             )
+            if is_same:
+                if not tx.buyer_name and reviewing.candidate.buyer_name:
+                    tx.buyer_name = reviewing.candidate.buyer_name
+                row = service.ledger.replace_reviewed_candidate(
+                    merchant.merchant_id,
+                    reviewing.candidate_id,
+                    reviewing.revision,
+                    tx,
+                    message.text_content or "Media clarification",
+                    service.clock(),
+                )
+            else:
+                row = service.stage(merchant, message.message_id, 0, tx)
         else:
             row = service.stage(merchant, message.message_id, 0, tx)
         review = (
@@ -462,6 +520,15 @@ def orchestrate_inbound_message(
         summary = candidate_summary(row.candidate, row.candidate_id, language, script,
                                     review=review)
         body = f"{clarification_text}\n\n{summary}" if review else summary
+        active_list = service.ledger.active_candidates(merchant.merchant_id, service.clock())
+        if len(active_list) > 1:
+            queue_info = f"\n\n📋 *All Pending Transactions ({len(active_list)} on hold)*:\n"
+            for i, ac in enumerate(active_list, start=1):
+                b = ac.candidate.buyer_name or "Sale"
+                cur = " 👈 (Latest)" if ac.candidate_id == row.candidate_id else ""
+                queue_info += f"• #{i} {b}: ₹{ac.candidate.total_amount:,.2f}{cur}\n"
+            queue_info += "\n(Held on hold until confirmed. Reply 'Confirm all' to post all, or 'Cancel previous'.)"
+            body += queue_info
         if review:
             return result, OutboundMessage(
                 recipient_phone=message.sender_phone, text_content=body

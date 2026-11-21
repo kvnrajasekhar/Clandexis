@@ -380,7 +380,7 @@ class MerchantOnboardingService:
                 "Return JSON only."
             )
             res = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=settings.EXTRACTOR_MODEL or "gemini-3.8-flash",
                 contents=[
                     types.Part.from_bytes(data=media_bytes, mime_type="audio/ogg"),
                     prompt,
@@ -424,7 +424,7 @@ class MerchantOnboardingService:
                 "Set unstated fields to null. Return JSON only."
             )
             res = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=settings.EXTRACTOR_MODEL or "gemini-3.8-flash",
                 contents=[
                     types.Part.from_bytes(data=media_bytes, mime_type=mime),
                     prompt,
