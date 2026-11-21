@@ -564,22 +564,23 @@ def orchestrate_inbound_message(
         or media_bytes is not None
         or bool(message.media_url)
     )
-    if (
-        not is_media_msg
-        and not is_inventory_msg
-        and message.message_type == MessageType.TEXT
-        and conversation.get("active_candidate_id")
-        and (
-            intent == "clarify_field"
-            or re.search(r"^\d+(\.\d+)?$|^price\b|^rate\b|^cost\b|ధర|ఖరీదు|விலை|भाव", raw_msg, re.I)
-        )
-    ):
+
+    # State-driven clarification: if a candidate is currently awaiting clarification or review,
+    # any follow-up response (text or audio) is naturally providing the missing facts.
+    active_cid = conversation.get("active_candidate_id")
+    if active_cid and not is_inventory_msg:
         try:
-            row = service.ledger.get_candidate(
-                merchant.merchant_id, conversation["active_candidate_id"]
-            )
-            if row.status == "AWAITING_CONFIRMATION" and row.expires_at > service.clock():
-                if row.candidate.needs_clarification or row.candidate.requires_review:
+            row = service.ledger.get_candidate(merchant.merchant_id, active_cid)
+            if (
+                row.status == "AWAITING_CONFIRMATION"
+                and row.expires_at > service.clock()
+                and (row.candidate.needs_clarification or row.candidate.requires_review or row.candidate.missing_fields)
+            ):
+                # Unless the merchant explicitly commands a brand-new sale or cancel, treat as clarification
+                is_explicit_new_tx = bool(
+                    re.search(r"\b(new sale|naya sale|kotha ammakam|start over|kotha transaction)\b", raw_msg, re.I)
+                )
+                if not is_explicit_new_tx:
                     reviewing = row
         except Exception:
             pass
@@ -587,14 +588,11 @@ def orchestrate_inbound_message(
     raw_text = message.text_content
     if reviewing:
         raw_text = (
-            "Clarify this same transaction using the merchant reply. Preserve buyer "
-            "and items. Leave unstated price and payment details null. Ask for "
-            "remaining missing details. "
-            f"Use language {language} and script {script}. Ask one specific "
-            "missing-field question at a time. Reassess missing_fields and "
-            "clarification flags after each reply. "
-            f"Current facts: {reviewing.candidate.model_dump_json()}\n"
-            f"Merchant reply: {message.text_content}"
+            "Clarify and update this same transaction draft using the merchant's reply. "
+            "Preserve known buyer, items, and quantities. Fill in missing price, payment method, or credit amount. "
+            f"Use language {language} and script {script}. Reassess missing_fields and clarification flags. "
+            f"Current draft facts: {reviewing.candidate.model_dump_json()}\n"
+            f"Merchant reply: {message.text_content or '(Spoken voice note / audio input)'}"
         )
     if pipeline is None:
         from app.pipeline import PipelineService
