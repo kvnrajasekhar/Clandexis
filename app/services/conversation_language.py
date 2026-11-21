@@ -230,40 +230,13 @@ def resolve_language_and_script(
 
     # For text messages, check input text directly
     if text:
-        if re.search(r"[\u0c00-\u0c7f]", text):
-            return "te", "Telugu"
-        if re.search(r"[\u0900-\u097f]", text):
-            return "hi", "Devanagari"
-        if re.search(r"[\u0a80-\u0aff]", text):
-            return "gu", "Gujarati"
-        if re.search(r"[\u0b80-\u0bff]", text):
-            return "ta", "Tamil"
-        if re.search(
-            r"\b(namaskaram|bagunnara|nenu|chesanu|chesa|ammnu|ammanu|ammaru|kavali|entha|teesukunna|ammamu|ammadu|ammindi|vachindi|istaru|baaki|leka)\b",
-            text,
-            re.I,
-        ):
-            if previous.get("detected_language") == "te" and previous.get("script_preference") == "Telugu":
-                return "te", "Telugu"
-            return "te", "Latin"
-        if re.search(
-            r"\b(namaste|pranam|ram ram|maine|becha|bechi|kitna|hai|chahiye|diya|liya|kharida|kaafi|hoga)\b",
-            text,
-            re.I,
-        ):
-            if previous.get("detected_language") == "hi" and previous.get("script_preference") == "Devanagari":
-                return "hi", "Devanagari"
-            return "hi", "Latin"
-        if re.search(r"\b(kem cho|majama|vechyu|aapo)\b", text, re.I):
-            return "gu", "Latin"
-        if re.search(r"\b(vanakkam|epdi|nallairukken|koduthen)\b", text, re.I):
-            return "ta", "Latin"
-        if re.search(
-            r"\b(I\b|sold|received|today|please|bought|purchase)\b",
-            text,
-            re.I,
-        ):
-            return "en", "Latin"
+        det_lang, det_script = preference(text, previous)
+        if det_lang != "en" or text.strip().lower() in ("hi", "hello", "start", "sold", "received", "today", "please"):
+            # If the user previously had native script and gives a short reply in latin/digits, preserve native script
+            if previous.get("script_preference") in ("Telugu", "Devanagari") and det_script == "Latin":
+                if det_lang == previous.get("detected_language") or not re.search(r"[a-zA-Z]{4,}", text):
+                    det_script = previous.get("script_preference", det_script)
+            return det_lang, det_script
 
     # Also check if tx has detected_language even if not explicitly marked is_audio
     if tx is not None:
@@ -277,10 +250,6 @@ def resolve_language_and_script(
 
     # Ambiguous or short clarification replies preserve the active candidate language
     return previous.get("detected_language", "en"), previous.get("script_preference", "Latin")
-
-
-def preference(text: str | None, previous: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
-    return resolve_language_and_script(text=text, previous=previous, is_audio=False)
 
 
 def question(
