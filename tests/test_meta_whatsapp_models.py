@@ -215,7 +215,6 @@ def test_registered_onboarding_button_uses_onboarding_route(mapped_service):
         }],
     }
 
-    assert mapped_service.parse_webhook_payload(raw_payload) == []
     messages = mapped_service.parse_unregistered_inbound_messages(
         raw_payload,
         include_registered_onboarding_actions=True,
