@@ -289,8 +289,8 @@ def _catalog(conn, merchant_id, plan):
                 line.item_name, products, ("item_name", "aliases", "sku_code"), "product"
             )
         except rules._Hold as h:
-            # Dynamic SKU auto-creation when explicit line pricing is present
-            if "not auto-creating" in str(h) and line.unit_price and line.unit_price > 0:
+            # Dynamic SKU auto-creation when explicit line pricing is present or when adding stock
+            if "not auto-creating" in str(h) and ((line.unit_price and line.unit_price > 0) or plan.kind == "stock_added"):
                 import re
                 base_code = re.sub(r"[^A-Za-z0-9]+", "-", line.item_name).strip("-").upper() or "ITEM"
                 sku_code = f"SKU-{base_code[:30]}"
@@ -299,7 +299,7 @@ def _catalog(conn, merchant_id, plan):
                     (merchant_id, sku_code, product_name, unit, default_unit_price, is_active)
                     VALUES (%s, %s, %s, %s, %s, true)
                     ON CONFLICT (merchant_id, sku_code) DO UPDATE SET is_active=true RETURNING *""",
-                    (merchant_id, sku_code, line.item_name, line.unit or "pieces", line.unit_price),
+                    (merchant_id, sku_code, line.item_name, line.unit or "pieces", line.unit_price or Decimal("0")),
                 ).fetchone()
                 key = str(new_row["id"])
                 products[key] = {**new_row, "item_name": new_row["product_name"]}
